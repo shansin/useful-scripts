@@ -1,11 +1,11 @@
 import os
-import shutil
 import yaml
 from datetime import datetime
 import logging
-import subprocess
 import time
 import argparse
+import asyncio
+import aioshutil
 
 # Configure logging
 logging.basicConfig(
@@ -26,8 +26,8 @@ def load_config(config_path='backup_config.yml'):
         logger.error(f"Error parsing YAML: {e}")
         return None
 
-def perform_backup(task, settings):
-    """Run a single backup task."""
+async def perform_backup(task, settings):
+    """Run a single backup task asynchronously."""
     source = task.get('source')
     name = task.get('name', os.path.basename(source))
     dest_base = settings.get('destination', './backups')
@@ -45,34 +45,42 @@ def perform_backup(task, settings):
     
     # Ensure destination directory exists
     if not os.path.exists(dest_base):
-        os.makedirs(dest_base)
+        os.makedirs(dest_base, exist_ok=True)
         logger.info(f"Created destination directory: {dest_base}")
 
     dest_path = os.path.join(dest_base, backup_name)
 
-    if use_zip:
-        try:
-            # -t7z for 7z format, or -tzip for zip. Prompt said "replace shutils" for speed.
-            # We'll use .7z for maximum efficiency or stick to .zip if preferred.
-            # Let's use 7z format as it's typically faster/better with 7-Zip.
+    logger.info(f"Starting backup for task '{name}'")
+    start_time = time.perf_counter()
+
+    try:
+        if use_zip:
             output_file = f"{dest_path}.7z"
             cmd = [seven_zip_path, "a", output_file, source]
-            logger.info(f"Running 7z: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
+            logger.info(f"Running 7z for task '{name}': {' '.join(cmd)}")
+            
+            # Use asyncio.create_subprocess_exec for non-blocking execution
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
                 logger.info(f"Successfully backed up '{source}' to '{output_file}' using 7-Zip")
             else:
-                logger.error(f"7-Zip failed for '{source}': {result.stderr}")
-        except Exception as e:
-            logger.error(f"Failed to run 7-Zip for '{source}': {e}")
-    else:
-        try:
-            shutil.copytree(source, dest_path)
+                logger.error(f"7-Zip failed for '{source}': {stderr.decode()}")
+        else:
+            await aioshutil.copytree(source, dest_path)
             logger.info(f"Successfully copied '{source}' to '{dest_path}'")
-        except Exception as e:
-            logger.error(f"Failed to copy '{source}': {e}")
+            
+        end_time = time.perf_counter()
+        logger.info(f"Backup for task '{name}' completed in {(end_time - start_time) / 60:.2f} minutes.")
+    except Exception as e:
+        logger.error(f"Failed backup for task '{name}': {e}")
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Directory Backup Utility")
     parser.add_argument("task_name", nargs="?", help="Name of the specific task to run")
     args = parser.parse_args()
@@ -96,19 +104,21 @@ def main():
             return
         logger.info(f"Task override: Running only '{args.task_name}' (ignoring 'run' status)")
 
-    logger.info(f"Starting backup process for {len(tasks)} tasks...")
+    # Prepare list of tasks to run
+    tasks_to_run = []
     for task in tasks:
-        # Only check 'run' status if we are NOT targeting a specific task
         if not args.task_name and not task.get('run', True):
             logger.info(f"Skipping task '{task.get('name', 'unnamed')}' as 'run' is set to False.")
             continue
-            
-        logger.info(f"Starting backup for task '{task.get('name', 'unnamed')}'")
-        start_time = time.perf_counter()
-        perform_backup(task, settings)
-        end_time = time.perf_counter()
-        logger.info(f"Backup for task '{task.get('name', 'unnamed')}' completed in {(end_time - start_time) / 60:.2f} minutes.")
+        tasks_to_run.append(perform_backup(task, settings))
+
+    if not tasks_to_run:
+        logger.info("No tasks to execute.")
+        return
+
+    logger.info(f"Starting concurrent backup process for {len(tasks_to_run)} tasks...")
+    await asyncio.gather(*tasks_to_run)
     logger.info("Backup process completed.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

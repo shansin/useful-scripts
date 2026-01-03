@@ -17,7 +17,7 @@ A robust, high-performance Python script designed for automated, timestamped bac
 
 ### ✨ Key Features
 - **🚀 Turbocharged Compression**: Uses 7-Zip (`7z.exe`) via subprocess for lightning-fast archiving.
-- **📁 Directory Sync**: Supports raw directory copying (`shutil.copytree`) when zipping is disabled.
+- **📁 Directory Sync**: Supports raw directory copying (`aioshutil.copytree`) when zipping is disabled.
 - **⏱️ Performance Metrics**: Automatically calculates and logs the duration of each backup task.
 - **⚙️ Granular Control**:
     - Manage multiple tasks via a single `backup_config.yml` file.
