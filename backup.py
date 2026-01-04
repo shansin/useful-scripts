@@ -6,6 +6,9 @@ import time
 import argparse
 import asyncio
 import aioshutil
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(
@@ -13,6 +16,16 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def push_notification(message):
+    import requests
+    #pushover setup
+    pushover_user = os.getenv("PUSHOVER_USER")
+    pushover_token = os.getenv("PUSHOVER_TOKEN")
+    pushover_url = "https://api.pushover.net/1/messages.json"
+    print(f"Push notificaiton to phone: {message}")
+    payload = {"user": pushover_user, "token": pushover_token, "message": message}
+    requests.post(pushover_url, data=payload)
 
 def load_config(config_path: str):
     """Load configuration from a YAML file."""
@@ -112,13 +125,15 @@ async def perform_backup(task, settings):
             
         end_time = time.perf_counter()
         logger.info(f"Backup for task '{name}' completed in {(end_time - start_time) / 60:.2f} minutes.")
+        push_notification(f"BACKUP | TASK COMPLETED: {name} in {(end_time - start_time) / 60:.2f} minutes!")
     except Exception as e:
         logger.error(f"Failed backup for task '{name}': {e}")
+        push_notification(f"BACKUP | TASK FAILED: {name} failed: {e}")
 
 async def main():
     parser = argparse.ArgumentParser(description="Directory Backup Utility")
-    parser.add_argument("task_name", nargs="?", help="Name of the specific task to run")
     parser.add_argument("config_name", nargs="?", help="Name of the config file to use")
+    parser.add_argument("task_name", nargs="?", help="Name of the specific task to run")
     args = parser.parse_args()
 
     config_path = args.config_name or "backup_config.yml"
@@ -155,8 +170,10 @@ async def main():
         return
 
     logger.info(f"Starting concurrent backup process for {len(tasks_to_run)} tasks...")
+    push_notification(f"BACKUP | STARTING {len(tasks_to_run)} TASKS!")
     await asyncio.gather(*tasks_to_run)
     logger.info("Backup process completed.")
+    push_notification(f"BACKUP | COMPLETED")
 
 if __name__ == "__main__":
     asyncio.run(main())
