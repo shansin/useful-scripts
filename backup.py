@@ -14,7 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_config(config_path='backup_config.yml'):
+def load_config(config_path: str):
     """Load configuration from a YAML file."""
     try:
         with open(config_path, 'r') as file:
@@ -26,12 +26,41 @@ def load_config(config_path='backup_config.yml'):
         logger.error(f"Error parsing YAML: {e}")
         return None
 
+async def sync_folders(source, destination):
+    """Recursively copy files that are not present in the destination."""
+    if not os.path.exists(destination):
+        os.makedirs(destination, exist_ok=True)
+    
+    new_files_count = 0
+    for root, dirs, files in os.walk(source):
+        rel_path = os.path.relpath(root, source)
+        if rel_path == ".":
+            dest_dir = destination
+        else:
+            dest_dir = os.path.join(destination, rel_path)
+        
+        if not os.path.exists(dest_dir):
+            os.makedirs(dest_dir, exist_ok=True)
+            
+        for file in files:
+            source_file = os.path.join(root, file)
+            dest_file = os.path.join(dest_dir, file)
+            
+            if not os.path.exists(dest_file):
+                await aioshutil.copy2(source_file, dest_file)
+                new_files_count += 1
+    
+    if new_files_count > 0:
+        logger.info(f"Incremental backup: Copied {new_files_count} new files.")
+    else:
+        logger.info("Incremental backup: No new files to copy.")
+
 async def perform_backup(task, settings):
     """Run a single backup task asynchronously."""
     source = task.get('source')
     name = task.get('name', os.path.basename(source))
     dest_base = settings.get('destination', './backups')
-    use_zip = settings.get('zip', False)
+    backup_type = task.get('type', 'normal')
     ts_format = settings.get('timestamp_format', '%Y%m%d_%H%M%S')
     seven_zip_path = settings.get('seven_zip_path', '7z')
     
@@ -39,9 +68,13 @@ async def perform_backup(task, settings):
         logger.warning(f"Source directory does not exist: {source}. Skipping task '{name}'.")
         return
 
-    timestamp = datetime.now().strftime(ts_format)
     source_dir_name = os.path.basename(os.path.normpath(source))
-    backup_name = f"{name}_{source_dir_name}_{timestamp}"
+    
+    if backup_type == 'incremental':
+        backup_name = f"{name}_{source_dir_name}"
+    else:
+        timestamp = datetime.now().strftime(ts_format)
+        backup_name = f"{name}_{source_dir_name}_{timestamp}"
     
     # Ensure destination directory exists
     if not os.path.exists(dest_base):
@@ -50,16 +83,15 @@ async def perform_backup(task, settings):
 
     dest_path = os.path.join(dest_base, backup_name)
 
-    logger.info(f"Starting backup for task '{name}'")
+    logger.info(f"Starting {backup_type} backup for task '{name}'")
     start_time = time.perf_counter()
 
     try:
-        if use_zip:
+        if backup_type == 'zip':
             output_file = f"{dest_path}.7z"
             cmd = [seven_zip_path, "a", output_file, source]
             logger.info(f"Running 7z for task '{name}': {' '.join(cmd)}")
             
-            # Use asyncio.create_subprocess_exec for non-blocking execution
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -71,7 +103,10 @@ async def perform_backup(task, settings):
                 logger.info(f"Successfully backed up '{source}' to '{output_file}' using 7-Zip")
             else:
                 logger.error(f"7-Zip failed for '{source}': {stderr.decode()}")
-        else:
+        elif backup_type == 'incremental':
+            await sync_folders(source, dest_path)
+            logger.info(f"Successfully synced '{source}' to '{dest_path}'")
+        else: # normal
             await aioshutil.copytree(source, dest_path)
             logger.info(f"Successfully copied '{source}' to '{dest_path}'")
             
@@ -86,7 +121,9 @@ async def main():
     parser.add_argument("config_name", nargs="?", help="Name of the config file to use")
     args = parser.parse_args()
 
-    config = load_config(args.config_name)
+    config_path = args.config_name or "backup_config.yml"
+
+    config = load_config(config_path)
     if not config:
         return
 

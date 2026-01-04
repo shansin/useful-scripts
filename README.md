@@ -17,13 +17,17 @@ A robust, high-performance Python script designed for automated, timestamped bac
 
 ### ✨ Key Features
 - **🚀 Turbocharged Compression**: Uses 7-Zip (`7z.exe`) via subprocess for lightning-fast archiving.
-- **📁 Directory Sync**: Supports raw directory copying (`aioshutil.copytree`) when zipping is disabled.
+- **📁 Backup Types**:
+    - `zip`: Uses 7-Zip for high-performance compression.
+    - `normal`: Standard directory copy with timestamps.
+    - `incremental`: Syncs only new files to a fixed destination folder (no timestamps), ideal for large data sets or photos and videos.
 - **⏱️ Performance Metrics**: Automatically calculates and logs the duration of each backup task.
 - **⚙️ Granular Control**:
     - Manage multiple tasks via a single `backup_config.yml` file.
+    - Set individual backup types per task.
     - Toggle tasks on/off with the `run` parameter.
     - **Override capability**: Run specific tasks via command line, bypassing the configuration's skip status.
-- **🛡️ Robustness**: Gracefully handles missing source paths and permission issues, ensuring your entire backup queue isn't stalled by a single failure.
+- **🛡️ Robustness**: Gracefully handles missing source paths and permission issues.
 
 ### 🚀 Usage
 
@@ -46,17 +50,18 @@ The script looks for `backup_config.yml` in the same directory.
 ```yaml
 backup_settings:
   destination: "<DestinationPath>"           # Global backup root
-  zip: true                               # Use 7z compression (true/false)
-  timestamp_format: "%Y%m%d_%H%M%S"       # Custom date/time format for filenames
+  timestamp_format: "%Y%m%d_%H%M%S"       # Custom date/time format
   seven_zip_path: "C:/Program Files/7-Zip/7z.exe" # Path to 7z executable
 
 tasks:
   - name: "<TaskName>"                  # Unique task identifier
     source: "<SourcePath>"
+    type: "zip"                           # Type: zip, normal, or incremental
     run: false                            # Set to false to skip during bulk runs
     
   - name: "<Task2Name>"
     source: "<Source2Path>"
+    type: "incremental"
     run: true
 ```
 

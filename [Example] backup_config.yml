@@ -1,13 +1,20 @@
 backup_settings:
   destination: "<DestinationPath>"
-  zip: true
   timestamp_format: "%Y%m%d_%H%M%S"
   seven_zip_path: "C:/Program Files/7-Zip/7z.exe"
 
 tasks:
   - name: "<TaskName>"
-    source: "<SourcePath>""
+    source: "<SourcePath>"
+    type: "zip"
     run: false
-  - name: "<Task2Name>""
+
+  - name: "<Task2Name>"
     source: "<Source2Path>"
+    type: "normal"
+    run: true
+
+  - name: "<Task3Name>"
+    source: "<Source3Path>"
+    type: "incremental"
     run: true
