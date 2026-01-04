@@ -83,9 +83,10 @@ async def perform_backup(task, settings):
 async def main():
     parser = argparse.ArgumentParser(description="Directory Backup Utility")
     parser.add_argument("task_name", nargs="?", help="Name of the specific task to run")
+    parser.add_argument("config_name", nargs="?", help="Name of the config file to use")
     args = parser.parse_args()
 
-    config = load_config()
+    config = load_config(args.config_name)
     if not config:
         return
 
