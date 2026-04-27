@@ -76,7 +76,7 @@ Description=Suspend to RAM and wake at $WAKE_TIME
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'rtcwake -m disable >/dev/null 2>&1 || true; target=\$(date -d "$WAKE_TIME" +%%s); now=\$(date +%%s); if [ "\$target" -le "\$now" ]; then target=\$(date -d "$WAKE_TIME tomorrow" +%%s); fi; rtcwake -m mem -l -t \$target'
+ExecStart=/bin/bash -c 'rtcwake -m disable >/dev/null 2>&1 || true; target=\$(date -d "$WAKE_TIME" +%%s); now=\$(date +%%s); if [ "\$target" -le "\$now" ]; then target=\$(date -d "$WAKE_TIME tomorrow" +%%s); fi; rtcwake -m mem -u -t \$target'
 EOF
 
 echo "=== Creating scheduled-sleep timer (sleep at $SLEEP_TIME daily) ==="
