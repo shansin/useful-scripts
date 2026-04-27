@@ -5,15 +5,16 @@ A collection of high-performance utility scripts for system maintenance, backup 
 ---
 
 ## 📋 Table of Contents
-- [backup.py (Directory Backup Utility)](#1-backuppy---directory-backup-utility)
+- [backup/ (Directory Backup Utility)](#1-backup---directory-backup-utility)
 - [link_ollama_lmstudio_models.py (Ollama<>Lm Studio Linker)](#2-link_ollama_lmstudio_modelspy---ollama-to-lm-studio-linker)
+- [setup_sleep_schedule.sh (Auto Sleep/Wake Scheduler)](#3-setup_sleep_schedulesh---auto-sleepwake-scheduler)
 - [Getting Started](#getting-started)
 
 ---
 
-## 📦 1. `backup.py` - Directory Backup Utility
+## 📦 1. `backup/` - Directory Backup Utility
 
-A robust, high-performance Python script designed for automated, timestamped backups. It leverages **7-Zip** for superior compression speed and efficiency.
+A robust, high-performance Python project designed for automated, timestamped backups. It leverages **7-Zip** for superior compression speed and efficiency. Lives in its own folder (`backup/`) with its own `pyproject.toml` / `uv.lock`.
 
 ### ✨ Key Features
 - **🚀 Turbocharged Compression**: Uses 7-Zip (`7z.exe`) via subprocess for lightning-fast archiving.
@@ -31,21 +32,27 @@ A robust, high-performance Python script designed for automated, timestamped bac
 
 ### 🚀 Usage
 
+All commands below are run from inside the `backup/` directory:
+
+```powershell
+cd backup
+```
+
 #### Standard Execution
 Run all tasks where `run: true` is set in the config:
 ```powershell
-uv run .\backup.py
+uv run backup.py
 ```
 
 #### Targeted Execution (Override)
 Run a specific task immediately, even if it is disabled (`run: false`) in the config:
 ```powershell
-uv run .\backup.py "YourTaskName"
+uv run backup.py "YourTaskName"
 ```
 
 ### 🔧 Configuration (`backup_config.yml`)
 
-The script looks for `backup_config.yml` in the same directory.
+The script looks for `backup_config.yml` in the current working directory (`backup/`). Copy `[Example] backup_config.yml` to `backup_config.yml` and edit it to match your setup.
 
 ```yaml
 backup_settings:
@@ -89,27 +96,61 @@ Avoid data duplication and save massive amounts of disk space by symlinking your
 
 ---
 
+## 💤 3. `setup_sleep_schedule.sh` - Auto Sleep/Wake Scheduler
+
+A Linux utility that schedules the machine to **suspend at a chosen time** and **wake automatically via the RTC alarm**. Useful for energy savings and enforcing a sleep schedule on always-on workstations.
+
+### ✨ Key Features
+- **🛏️ Configurable Times**: Pass any sleep and wake times in `HH:MM` (24h) format.
+- **♻️ Idempotent**: Re-running the script tears down the existing schedule and installs the new one — no leftover units or stale RTC alarms.
+- **🧠 Smart Wake Resolution**: Wake target resolves to today's `HH:MM` if still in the future, otherwise tomorrow's — so a `00:00 → 06:00` schedule wakes 6 hours later, not 30.
+- **🧩 systemd-native**: Installs a `scheduled-sleep.service` + `scheduled-sleep.timer` pair and enables them automatically.
+- **🧹 Clean Undo**: Single `--undo` flag removes the timer, service, and any pending RTC alarm.
+
+### 🚀 Usage
+
+> [!IMPORTANT]
+> Must be run as **root** (uses `systemctl`, writes to `/etc/systemd/system`, and calls `rtcwake`).
+
+#### Install / Replace Schedule
+```bash
+sudo bash setup_sleep_schedule.sh <sleep_time> <wake_time>
+
+# Examples
+sudo bash setup_sleep_schedule.sh 00:00 06:00
+sudo bash setup_sleep_schedule.sh 23:30 07:15
+```
+
+#### Remove Schedule
+```bash
+sudo bash setup_sleep_schedule.sh --undo
+```
+
+### 🔧 What It Installs
+- `/etc/systemd/system/scheduled-sleep.service` — runs `rtcwake -m mem -l -t <wake_epoch>` to suspend and arm the wake alarm.
+- `/etc/systemd/system/scheduled-sleep.timer` — fires the service daily at `<sleep_time>`.
+
+---
+
 ## ⚙️ Getting Started
 
 ### Prerequisites
 - **Python 3.12+**
-- **7-Zip** (for `backup.py`)
+- **7-Zip** (for `backup/backup.py`)
 - **uv** (Recommended for dependency management)
 
 ### Environment Setup
-If you are setting up for the first time:
+The Python project lives in `backup/`. From the repo root:
 
 ```powershell
-# Initialize the project environment
-uv init
-
-# Install required dependencies
-uv add PyYAML
+cd backup
+uv sync
 ```
 
 ### Manual Installation (without uv)
 If you prefer standard pip:
 ```powershell
-pip install PyYAML
+cd backup
+pip install -r requirements.txt
 python backup.py
 ```
