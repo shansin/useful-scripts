@@ -34,8 +34,10 @@ fi
 
 remove_schedule() {
     systemctl disable --now scheduled-sleep.timer 2>/dev/null || true
+    systemctl disable resume-network.service 2>/dev/null || true
     rm -f /etc/systemd/system/scheduled-sleep.service
     rm -f /etc/systemd/system/scheduled-sleep.timer
+    rm -f /etc/systemd/system/resume-network.service
     systemctl daemon-reload
     rtcwake -m disable 2>/dev/null || true
 }
@@ -76,7 +78,7 @@ Description=Suspend to RAM and wake at $WAKE_TIME
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'echo 0 > /sys/class/rtc/rtc0/wakealarm 2>/dev/null; echo off > /sys/class/rtc/rtc0/wakealarm 2>/dev/null; target=\$(date -d "$WAKE_TIME" +%%s); now=\$(date +%%s); if [ "\$target" -le "\$now" ]; then target=\$(date -d "$WAKE_TIME tomorrow" +%%s); fi; exec rtcwake -m mem -l -t \$target'
+ExecStart=/bin/bash -c 'echo 0 > /sys/class/rtc/rtc0/wakealarm 2>/dev/null; echo off > /sys/class/rtc/rtc0/wakealarm 2>/dev/null; target=\$(date -d "$WAKE_TIME" +%%s); now=\$(date +%%s); if [ "\$target" -le "\$now" ]; then target=\$(date -d "$WAKE_TIME tomorrow" +%%s); fi; rtcwake -m no -l -t \$target && exec systemctl suspend'
 EOF
 
 echo "=== Creating scheduled-sleep timer (sleep at $SLEEP_TIME daily) ==="
@@ -92,11 +94,28 @@ Persistent=false
 WantedBy=timers.target
 EOF
 
+echo "=== Creating resume-network service (restart NetworkManager after wake) ==="
+cat > /etc/systemd/system/resume-network.service <<'EOF'
+[Unit]
+Description=Restart NetworkManager after resume from suspend
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart NetworkManager
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+EOF
+
 echo "=== Reloading systemd ==="
 systemctl daemon-reload
 
 echo "=== Enabling scheduled-sleep timer ==="
 systemctl enable --now scheduled-sleep.timer
+
+echo "=== Enabling resume-network service ==="
+systemctl enable resume-network.service
 
 echo ""
 echo "=== Verification ==="
@@ -106,5 +125,6 @@ systemctl list-timers scheduled-sleep.timer --no-pager
 echo ""
 echo "Setup complete!"
 echo "  - Machine will suspend at $SLEEP_TIME and wake at $WAKE_TIME daily via RTC alarm"
+echo "  - NetworkManager will restart automatically after each resume"
 echo "  - To change schedule: re-run with new times"
 echo "  - To undo: sudo bash $0 --undo"
