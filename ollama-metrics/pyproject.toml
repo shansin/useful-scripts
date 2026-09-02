@@ -1,0 +1,8 @@
+[project]
+name = "ollama-metrics"
+version = "0.1.0"
+description = "Live API metrics dashboard for a local Ollama server"
+readme = "README.md"
+requires-python = ">=3.12"
+# Standard library only -- curses, urllib and subprocess. Nothing to install.
+dependencies = []

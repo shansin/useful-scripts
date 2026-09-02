@@ -38,6 +38,7 @@ remove_schedule() {
     rm -f /etc/systemd/system/scheduled-sleep.service
     rm -f /etc/systemd/system/scheduled-sleep.timer
     rm -f /etc/systemd/system/resume-network.service
+    rm -f /usr/lib/systemd/system-sleep/99-resume-network
     systemctl daemon-reload
     rtcwake -m disable 2>/dev/null || true
 }
@@ -94,28 +95,35 @@ Persistent=false
 WantedBy=timers.target
 EOF
 
-echo "=== Creating resume-network service (restart NetworkManager after wake) ==="
-cat > /etc/systemd/system/resume-network.service <<'EOF'
-[Unit]
-Description=Restart NetworkManager after resume from suspend
-After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl restart NetworkManager
-
-[Install]
-WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+echo "=== Installing system-sleep hook (reload igc + restart NetworkManager on resume) ==="
+mkdir -p /usr/lib/systemd/system-sleep
+cat > /usr/lib/systemd/system-sleep/99-resume-network <<'EOF'
+#!/bin/sh
+# Recover Intel I226-V (igc) LAN after resume.
+# The igc driver occasionally comes back wedged; reloading the module
+# plus restarting NetworkManager reliably restores the link.
+case "$1/$2" in
+    post/*)
+        sleep 2
+        modprobe -r igc 2>/dev/null
+        sleep 1
+        modprobe igc 2>/dev/null
+        systemctl restart NetworkManager
+        nm-online -q --timeout=20 || {
+            sleep 3
+            systemctl restart NetworkManager
+            nm-online -q --timeout=20 || true
+        }
+        ;;
+esac
 EOF
+chmod +x /usr/lib/systemd/system-sleep/99-resume-network
 
 echo "=== Reloading systemd ==="
 systemctl daemon-reload
 
 echo "=== Enabling scheduled-sleep timer ==="
 systemctl enable --now scheduled-sleep.timer
-
-echo "=== Enabling resume-network service ==="
-systemctl enable resume-network.service
 
 echo ""
 echo "=== Verification ==="
@@ -125,6 +133,6 @@ systemctl list-timers scheduled-sleep.timer --no-pager
 echo ""
 echo "Setup complete!"
 echo "  - Machine will suspend at $SLEEP_TIME and wake at $WAKE_TIME daily via RTC alarm"
-echo "  - NetworkManager will restart automatically after each resume"
+echo "  - igc driver is reloaded and NetworkManager restarted after each resume"
 echo "  - To change schedule: re-run with new times"
 echo "  - To undo: sudo bash $0 --undo"

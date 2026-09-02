@@ -8,6 +8,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [backup/ (Directory Backup Utility)](#1-backup---directory-backup-utility)
 - [link_ollama_lmstudio_models.py (Ollama<>Lm Studio Linker)](#2-link_ollama_lmstudio_modelspy---ollama-to-lm-studio-linker)
 - [setup_sleep_schedule.sh (Auto Sleep/Wake Scheduler)](#3-setup_sleep_schedulesh---auto-sleepwake-scheduler)
+- [ollama-metrics/ (Ollama API Metrics Dashboard)](#4-ollama-metrics---ollama-api-metrics-dashboard)
 - [Getting Started](#getting-started)
 
 ---
@@ -132,6 +133,38 @@ sudo bash setup_sleep_schedule.sh --undo
 
 ---
 
+## 📊 4. `ollama-metrics/` - Ollama API Metrics Dashboard
+
+A live terminal dashboard for a local **Ollama** server. Ollama ships no Prometheus endpoint (`/metrics` is a 404), so this reconstructs history by parsing the service's systemd journal and combines it with live `/api/ps` and `nvidia-smi` readings. Lives in its own folder (`ollama-metrics/`) with its own `pyproject.toml`.
+
+### ✨ Key Features
+- **📈 Request Metrics**: Total volume, error rate, req/min, and p50/p95/p99/max latency, broken down by endpoint.
+- **⚡ Token Throughput**: Generation and prompt-eval tok/s (avg, p50, p95) plus total tokens in and out.
+- **🧠 Per-Model Activity**: Inferences, average generation speed, load count, and average load time for each model.
+- **🎮 Live GPU State**: Resident models with VRAM use and keep-alive countdown, alongside per-GPU memory, utilisation, temperature, and power.
+- **🌐 Client Visibility**: Top client IPs — handy when the server answers over a LAN or Tailscale.
+- **🪶 Zero Dependencies**: Pure Python 3.12 standard library. Backfills history once, then follows `journalctl -f` on a background thread so refreshes stay cheap.
+
+### 🚀 Usage
+
+> [!IMPORTANT]
+> Requires read access to the service journal — your user must be in the `adm` or `systemd-journal` group.
+
+```bash
+cd ollama-metrics
+
+./ollama_metrics.py                  # live dashboard (default 24h of history)
+./ollama_metrics.py --window 7d      # summarise a week
+./ollama_metrics.py --once           # one plain-text report, then exit
+./ollama_metrics.py --json | jq .    # machine-readable snapshot
+```
+
+Keys: `q` quit · `r` refresh · `w` cycle window (1h → 24h → 7d) · `p` pause.
+
+See [`ollama-metrics/README.md`](ollama-metrics/README.md) for the full flag list, data sources, and caveats.
+
+---
+
 ## ⚙️ Getting Started
 
 ### Prerequisites
@@ -140,12 +173,14 @@ sudo bash setup_sleep_schedule.sh --undo
 - **uv** (Recommended for dependency management)
 
 ### Environment Setup
-The Python project lives in `backup/`. From the repo root:
+The dependency-managed Python project lives in `backup/`. From the repo root:
 
 ```powershell
 cd backup
 uv sync
 ```
+
+`ollama-metrics/` is standard library only — no setup needed, just run it.
 
 ### Manual Installation (without uv)
 If you prefer standard pip:
