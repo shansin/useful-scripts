@@ -11,6 +11,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [ollama-metrics/ (Ollama API Metrics Dashboard)](#4-ollama-metrics---ollama-api-metrics-dashboard)
 - [passwordless-ssh-setup.sh (Passwordless SSH Setup)](#5-passwordless-ssh-setupsh---passwordless-ssh-setup)
 - [install-claude-statusline.sh (Claude Code Status Line)](#6-install-claude-statuslinesh---claude-code-status-line)
+- [recreate-mac-shell.sh (Mac zsh Prompt Setup)](#7-recreate-mac-shellsh---mac-zsh-prompt-setup)
 - [Getting Started](#getting-started)
 
 ---
@@ -215,6 +216,19 @@ CLAUDE_DIR=~/.claude ./install-claude-statusline.sh
 
 > [!NOTE]
 > Requires `jq` (`brew install jq` / `sudo apt-get install -y jq`). Colors use 24-bit truecolor (iTerm2, Ghostty, kitty, WezTerm, modern GNOME Terminal).
+
+---
+
+## 🐚 7. `recreate-mac-shell.sh` - Mac zsh Prompt Setup
+
+Recreates my zsh setup on a fresh Mac: a dependency-free `vcs_info` prompt (cwd + git branch with `+`/`*` for staged/unstaged changes, clock on the right), shared history, case-insensitive menu completion, plus `zsh-autosuggestions`, `zsh-syntax-highlighting`, `fzf` and `zoxide`. Also installs iTerm2 (if missing) and adds my profile (Monaco 15, light colour scheme) as a Dynamic Profile named **Shell Setup**, set as default.
+
+```bash
+./recreate-mac-shell.sh              # install Homebrew + packages + iTerm2 (if missing), write configs
+./recreate-mac-shell.sh --no-install # only write ~/.zshrc and the iTerm2 profile
+```
+
+Any existing `~/.zshrc` is backed up to `~/.zshrc.bak.<timestamp>`. Run `exec zsh` afterwards. Run it from Terminal.app (with iTerm2 quit) so the default-profile switch sticks; otherwise pick the profile manually in iTerm2 settings.
 
 ---
 
