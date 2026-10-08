@@ -10,6 +10,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [setup_sleep_schedule.sh (Auto Sleep/Wake Scheduler)](#3-setup_sleep_schedulesh---auto-sleepwake-scheduler)
 - [ollama-metrics/ (Ollama API Metrics Dashboard)](#4-ollama-metrics---ollama-api-metrics-dashboard)
 - [passwordless-ssh-setup.sh (Passwordless SSH Setup)](#5-passwordless-ssh-setupsh---passwordless-ssh-setup)
+- [install-claude-statusline.sh (Claude Code Status Line)](#6-install-claude-statuslinesh---claude-code-status-line)
 - [Getting Started](#getting-started)
 
 ---
@@ -186,6 +187,34 @@ KEY=~/.ssh/id_work ./passwordless-ssh-setup.sh      # use a different key path
 
 > [!TIP]
 > For Linux machines on Tailscale, `sudo tailscale up --ssh` on the remote is a keyless alternative (subject to your tailnet's SSH ACLs).
+
+---
+
+## 📟 6. `install-claude-statusline.sh` - Claude Code Status Line
+
+Installs a two-line [Claude Code](https://claude.com/claude-code) status line and wires it into `~/.claude/settings.json`.
+
+```
+◆ Opus 5.5 · high   ~/code/useful-scripts   ⎇ main ↑1 +2 ~1 ?3   $1.87
+ctx █████    63%   cache █████▌   41m →23:57   5h ████▋    59% ↻2h13   7d ██▏      28% ↻2d7h
+```
+
+### ✨ Key Features
+- **🧭 Line 1 — Who & Where**: Model and effort, current path, git branch with ahead/behind (`↑`/`↓`), staged `+`, modified `~`, untracked `?` (or `✓` when clean), and session cost.
+- **📊 Line 2 — Gauges**: Smooth 1/8-cell bars on a dark track for context used, prompt-cache time left (with expiry time), and 5h/7d quota left (with reset countdown).
+- **🚦 Health Colors**: Green → yellow → red. Quotas are colored by burn rate versus time elapsed in the window, not just raw usage.
+- **🔤 No Special Fonts**: Plain Unicode only — no Nerd Font required.
+- **🛡️ Safe Install**: Backs up `settings.json`, removes older statusline scripts, and smoke-tests the result. `--uninstall` removes it cleanly.
+
+### 🚀 Usage
+```bash
+./install-claude-statusline.sh               # install / replace
+./install-claude-statusline.sh --uninstall   # remove
+CLAUDE_DIR=~/.claude ./install-claude-statusline.sh
+```
+
+> [!NOTE]
+> Requires `jq` (`brew install jq` / `sudo apt-get install -y jq`). Colors use 24-bit truecolor (iTerm2, Ghostty, kitty, WezTerm, modern GNOME Terminal).
 
 ---
 
