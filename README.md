@@ -9,6 +9,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [link_ollama_lmstudio_models.py (Ollama<>Lm Studio Linker)](#2-link_ollama_lmstudio_modelspy---ollama-to-lm-studio-linker)
 - [setup_sleep_schedule.sh (Auto Sleep/Wake Scheduler)](#3-setup_sleep_schedulesh---auto-sleepwake-scheduler)
 - [ollama-metrics/ (Ollama API Metrics Dashboard)](#4-ollama-metrics---ollama-api-metrics-dashboard)
+- [passwordless-ssh-setup.sh (Passwordless SSH Setup)](#5-passwordless-ssh-setupsh---passwordless-ssh-setup)
 - [Getting Started](#getting-started)
 
 ---
@@ -162,6 +163,29 @@ cd ollama-metrics
 Keys: `q` quit · `r` refresh · `w` cycle window (1h → 24h → 7d) · `p` pause.
 
 See [`ollama-metrics/README.md`](ollama-metrics/README.md) for the full flag list, data sources, and caveats.
+
+---
+
+## 🔑 5. `passwordless-ssh-setup.sh` - Passwordless SSH Setup
+
+An interactive terminal walkthrough that sets up key-based SSH login to your other machines. Built with Tailscale in mind, but works with any reachable host. Runs on macOS (stock bash 3.2) and Linux.
+
+### ✨ Key Features
+- **🔐 Key Creation**: Creates an `ed25519` key if `~/.ssh/id_ed25519` doesn't exist, and loads passphrase-protected keys into `ssh-agent` (macOS Keychain on a Mac).
+- **🌐 Tailscale Discovery**: Lists online Linux/macOS peers from `tailscale status` so you pick machines by number — or type any hostname/IP.
+- **📤 Key Copy + Verify**: Uses `ssh-copy-id` (with a fallback when it's missing), then confirms the key login actually works.
+- **🏷️ Short Aliases**: Optionally adds `Host` entries to `~/.ssh/config` (e.g. `ssh bigrig` for `bigrig-linux`), backing the file up first.
+- **♻️ Idempotent**: Skips hosts that already accept the key and aliases that already exist.
+
+### 🚀 Usage
+```bash
+./passwordless-ssh-setup.sh                         # pick machines interactively
+./passwordless-ssh-setup.sh bigrig-linux sb-linux   # set up specific machines
+KEY=~/.ssh/id_work ./passwordless-ssh-setup.sh      # use a different key path
+```
+
+> [!TIP]
+> For Linux machines on Tailscale, `sudo tailscale up --ssh` on the remote is a keyless alternative (subject to your tailnet's SSH ACLs).
 
 ---
 
