@@ -11,7 +11,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from parsers import Marker, ModelLoad, ModelSelect, Request, Timing
+from parsers import Marker, ModelLoad, ModelSelect, Request, Timing, is_inference_request
 
 # Each model load logs "llama-server started in N seconds" twice, ~30ms apart,
 # from two different waiters. Collapse loads closer together than this.
@@ -154,6 +154,11 @@ class MetricsStore:
         latencies: list[list[float]] = [[] for _ in range(buckets)]
         gen_tps: list[list[float]] = [[] for _ in range(buckets)]
         tokens_out = [0] * buckets
+        # Filtered inference series (excludes /api/ps|tags|version polling).
+        inf_counts = [0] * buckets
+        inf_latencies: list[list[float]] = [[] for _ in range(buckets)]
+        inf_completions = [0] * buckets
+        prompt_tps: list[list[float]] = [[] for _ in range(buckets)]
 
         for req in requests:
             i = index_of(req.ts)
@@ -161,12 +166,20 @@ class MetricsStore:
             latencies[i].append(req.latency)
             if req.status >= 400:
                 errors[i] += 1
+            if is_inference_request(req.method, req.path):
+                inf_counts[i] += 1
+                inf_latencies[i].append(req.latency)
 
         for timing in timings:
+            if timing.kind == "prompt eval":
+                if timing.tps:
+                    prompt_tps[index_of(timing.ts)].append(timing.tps)
+                continue
             if timing.kind != "eval":
                 continue
             i = index_of(timing.ts)
             tokens_out[i] += timing.tokens
+            inf_completions[i] += 1
             if timing.tps:
                 gen_tps[i].append(timing.tps)
 
@@ -184,12 +197,21 @@ class MetricsStore:
             "gen_tps": [sum(v) / len(v) if v else 0.0 for v in gen_tps],
             "tokens_out": [float(t) for t in tokens_out],
             "errors": [float(e + f) for e, f in zip(errors, failures)],
+            # Inference-only (filtered) series + prompt throughput.
+            "inf_per_min": [c / per_minute if per_minute else 0.0 for c in inf_counts],
+            "inf_completions_per_min": [
+                c / per_minute if per_minute else 0.0 for c in inf_completions
+            ],
+            "prompt_tps": [sum(v) / len(v) if v else 0.0 for v in prompt_tps],
+            "latency_p95_inf": [percentile(l, 95) for l in inf_latencies],
         }
 
     @staticmethod
     def _request_stats(requests: list[Request], window: timedelta) -> dict:
         latencies = [r.latency for r in requests]
         errors = [r for r in requests if r.status >= 400]
+        inf_requests = [r for r in requests if is_inference_request(r.method, r.path)]
+        inf_latencies = [r.latency for r in inf_requests]
 
         by_endpoint = {}
         for req in requests:
@@ -221,6 +243,14 @@ class MetricsStore:
             "endpoints": endpoints,
             "clients": Counter(r.ip for r in requests).most_common(),
             "statuses": dict(sorted(Counter(r.status for r in requests).items())),
+            "inference": {
+                "total": len(inf_requests),
+                "per_minute": len(inf_requests) / minutes if minutes else 0.0,
+                "p50": percentile(inf_latencies, 50),
+                "p95": percentile(inf_latencies, 95),
+                "p99": percentile(inf_latencies, 99),
+                "max": max(inf_latencies, default=0.0),
+            },
         }
 
     @staticmethod

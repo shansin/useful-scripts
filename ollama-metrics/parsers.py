@@ -31,7 +31,7 @@ GIN_RE = re.compile(
     r"\|\s*(?P<method>[A-Z]+)\s+\"(?P<path>[^\"]*)\""
 )
 
-# llama-server per-request timings. The `total time` variant has no
+# llama-server per-request timings (legacy format). The `total time` variant has no
 # per-token/per-second parenthetical, so those groups must stay optional.
 TIMING_RE = re.compile(
     r"slot print_timing:\s+id\s+(?P<slot>\d+)\s*\|\s*task\s+(?P<task>\d+)\s*\|\s*"
@@ -39,6 +39,43 @@ TIMING_RE = re.compile(
     r"(?P<tokens>\d+)\s+tokens"
     r"(?:\s*\(\s*[\d.]+\s+ms per token,\s*(?P<tps>[\d.]+)\s+tokens per second\))?"
 )
+
+# Newer llama-server formats (Ollama ~0.11+). Examples:
+#   slot print_timing: id  0 | task 38 | prompt processing, n_tokens =   5632,
+#       progress = 0.30, t =   3.16 s / 1782.73 tokens per second
+#   slot print_timing: id  0 | task 38 | n_gen =    159, tg =  52.31 t/s, ...
+PROMPT_PROC_RE = re.compile(
+    r"slot print_timing:\s+id\s+(?P<slot>\d+)\s*\|\s*task\s+(?P<task>\d+)\s*\|\s*"
+    r"prompt processing,\s*n_tokens\s*=\s*(?P<tokens>\d+).*?"
+    r"t\s*=\s*(?P<secs>[\d.]+)\s*s\s*/\s*(?P<tps>[\d.]+)\s*tokens per second"
+)
+GEN_RE = re.compile(
+    r"slot print_timing:\s+id\s+(?P<slot>\d+)\s*\|\s*task\s+(?P<task>\d+)\s*\|\s*"
+    r"n_gen\s*=\s*(?P<tokens>\d+),\s*tg\s*=\s*(?P<tps>[\d.]+)\s*t/s"
+)
+
+# Requests that actually run inference. Everything else ([GIN] GET /api/ps,
+# /api/tags, /api/version, ...) is polling/management noise from dashboards
+# and monitoring, and must be excluded from inference RPS.
+INFERENCE_PATH_PREFIXES = (
+    "/api/generate",
+    "/api/chat",
+    "/api/embed",
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/embeddings",
+)
+
+
+def is_inference_request(method: str, path: str) -> bool:
+    """True for POSTs that run model inference (vs polling/management)."""
+    if method != "POST":
+        return False
+    clean = path.split("?", 1)[0].strip()
+    return clean == "/api/embeddings" or any(
+        clean == prefix or clean.startswith(prefix + "/")
+        for prefix in INFERENCE_PATH_PREFIXES
+    )
 
 MODEL_SELECT_RE = re.compile(r'msg="template selection"\s+model=(?P<model>\S+)')
 LOAD_RE = re.compile(r'msg="llama-server started in (?P<secs>[\d.]+) seconds"')
@@ -159,6 +196,33 @@ def parse_line(line: str):
             seconds=float(timing.group("ms")) / 1000.0,
             tps=float(tps) if tps else None,
         )
+
+    prompt_proc = PROMPT_PROC_RE.search(msg)
+    if prompt_proc:
+        return Timing(
+            ts=ts,
+            kind="prompt eval",
+            tokens=int(prompt_proc.group("tokens")),
+            seconds=float(prompt_proc.group("secs")),
+            tps=float(prompt_proc.group("tps")),
+        )
+
+    gen = GEN_RE.search(msg)
+    if gen:
+        tokens = int(gen.group("tokens"))
+        tps = float(gen.group("tps"))
+        return Timing(
+            ts=ts,
+            kind="eval",
+            tokens=tokens,
+            seconds=(tokens / tps) if tps > 0 else 0.0,
+            tps=tps,
+        )
+
+    # Speculative-decode accuracy lines carry no throughput info.
+    #   slot print_timing: id  0 | task 2750 | acc per pos = (0.28, ...)
+    if "acc per pos" in msg and "print_timing" in msg:
+        return None
 
     select = MODEL_SELECT_RE.search(msg)
     if select:

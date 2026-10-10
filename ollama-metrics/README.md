@@ -11,15 +11,24 @@ combined with live `/api/ps` and `nvidia-smi` readings.
 
 - **Requests** — total, error rate, req/min, p50 / p95 / p99 / max latency, a
   breakdown by endpoint, and the top client IPs (useful when the server is
-  reachable over a LAN or Tailscale).
+  reachable over a LAN or Tailscale). Plus a filtered **Inference** line
+  (POST `/api/generate`, `/api/chat`, `/v1/chat/completions`, …) with its own
+  inf/min and p50/p95/max, so dashboard polling (`/api/ps`, `/api/version`)
+  no longer pollutes the signal.
 - **Tokens** — generation and prompt-eval throughput (avg / p50 / p95 tok/s)
-  plus total tokens in and out.
+  plus total tokens in and out. Parses both legacy
+  (`prompt eval time = …`) and current (`prompt processing …`, `n_gen …`)
+  `slot print_timing:` formats.
 - **Models** — inferences, average generation speed, load count and average
   load time, per model.
 - **Activity graphs** — the window plotted over time: a full-height chart of
-  the series you pick with `g` (req/min, p95 latency, gen tok/s, tokens out,
-  errors), with a sparkline and peak for every series underneath. One column
-  is one time bucket, sized to the terminal.
+  the series you pick with `g` (req/min, inf req/min, inf done/min, p95,
+  inf p95, gen tok/s, prompt tok/s, tokens out, GPU util% / temp avg+max /
+  power avg+max, errors), with a sparkline plus current (`now`) and `peak`
+  for every series underneath. One column is one time bucket, sized to the
+  terminal. GPU util uses a fixed 0-100 scale; GPU temp uses min-max scaling
+  so small swings stay visible. Multi-GPU values are aggregated across GPUs
+  (avg = mean, max = hottest).
 - **Live state** — resident models with VRAM use and keep-alive countdown, and
   per-GPU memory / utilisation / temperature / power.
 - **Pressure signals** — VRAM evictions and server restarts in the window.
@@ -65,15 +74,20 @@ plain-text report, so `./ollama_metrics.py > report.txt` does the right thing.
 | Metric | Source |
 |---|---|
 | Status, latency, endpoint, client IP | `[GIN]` access log lines |
-| Token counts and tok/s | `slot print_timing:` lines |
+| Inference RPS (filtered) | `[GIN] POST` to `/api/generate`, `/api/chat`, `/v1/chat/completions`, … |
+| Token counts and tok/s | `slot print_timing:` lines (legacy + `prompt processing` / `n_gen` formats) |
 | Model names | `msg="template selection"` lines |
 | Load duration | `msg="llama-server started in N seconds"` |
 | Evictions / restarts | scheduler and startup log lines |
 | Resident models, VRAM, keep-alive | `GET /api/ps` |
 | Installed models, disk use | `GET /api/tags` |
+| GPU util / temp / power history | `nvidia-smi` sampled each refresh (in-memory, since launch) |
 
 History is backfilled once at startup, then followed with `journalctl -f` on a
 background thread, so refresh ticks stay cheap no matter how long the window is.
+GPU history cannot be backfilled — `nvidia-smi` is live-only — so GPU graphs
+fill in after launch and `--once` shows a single sample until the dashboard
+has been running a while.
 
 ### Caveats
 
@@ -83,8 +97,9 @@ background thread, so refresh ticks stay cheap no matter how long the window is.
   `OLLAMA_MAX_LOADED_MODELS` above 1, two resident runners cannot be told
   apart, so per-model attribution is best-effort during concurrent use.
 - Activity logged before the first model-selection line lands under `unknown`.
-- The dashboard's own polling of `/api/ps` and `/api/tags` shows up in the
-  request counts.
+- Total request counts include the dashboard's own polling of `/api/ps` and
+  `/api/tags`; use the Inference line / `inf req/min` graph for the clean signal.
+- GPU graphs are live-only (no 24h/7d backfill); `--no-gpu` hides them.
 
 ## 🗂️ Layout
 

@@ -62,6 +62,7 @@ class Application:
         self.graph_buckets = metrics.DEFAULT_BUCKETS
         self._library = {"count": 0, "disk": 0}
         self._library_checked = 0.0
+        self.gpu_hist = collectors.GpuHistory()
 
     def load_history(self) -> None:
         self.store = MetricsStore(retention=self.window)
@@ -90,17 +91,22 @@ class Application:
             self._library = collectors.probe_library(self.host)
             self._library_checked = time.monotonic()
 
+        gpus = collectors.probe_gpus() if self.use_gpu else []
+        if self.use_gpu:
+            # In-memory only: history starts at launch, no backfill possible.
+            self.gpu_hist.sample(gpus, now=now)
+        snapshot = self.store.snapshot(self.window, now=now, buckets=self.graph_buckets)
+        snapshot["gpu_series"] = self.gpu_hist.series() if self.use_gpu else {}
+
         return {
             "host": self.host,
             "hostname": self.hostname,
             "server": collectors.probe_server(self.host),
             "service": collectors.probe_service(),
-            "gpus": collectors.probe_gpus() if self.use_gpu else [],
+            "gpus": gpus,
             "library": self._library,
             "graph_index": self.graph_index,
-            "snapshot": self.store.snapshot(
-                self.window, now=now, buckets=self.graph_buckets
-            ),
+            "snapshot": snapshot,
         }
 
     def close(self) -> None:

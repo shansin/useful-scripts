@@ -14,6 +14,7 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta
 
 from parsers import parse_line
@@ -203,6 +204,83 @@ def probe_gpus() -> list[dict]:
             }
         )
     return gpus
+
+
+class GpuHistory:
+    """In-memory ring buffer of `nvidia-smi` samples, oldest first.
+
+    GPU state is live-only (no journal backfill exists), so history starts at
+    dashboard launch. `sample()` is called once per refresh tick; `series()`
+    returns raw time-ordered lists that dashboard._fit() resamples onto the
+    terminal width, same as the journal-bucketed series.
+    """
+
+    def __init__(self, maxlen: int = 400):
+        self.samples: deque[dict] = deque(maxlen=maxlen)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def sample(self, gpus: list[dict], now: datetime | None = None) -> None:
+        if not gpus:
+            return
+        now = now or datetime.now().astimezone()
+        utils = [float(g.get("utilization") or 0.0) for g in gpus]
+        temps = [float(g.get("temperature") or 0.0) for g in gpus]
+        powers = [float(g.get("power") or 0.0) for g in gpus]
+        mem_used = sum(float(g.get("memory_used") or 0.0) for g in gpus)
+        mem_total = sum(float(g.get("memory_total") or 0.0) for g in gpus)
+        self.samples.append(
+            {
+                "ts": now,
+                "util_avg": sum(utils) / len(utils) if utils else 0.0,
+                "util_max": max(utils, default=0.0),
+                "temp_max": max(temps, default=0.0),
+                "temp_avg": sum(temps) / len(temps) if temps else 0.0,
+                "power_sum": sum(powers),
+                "power_avg": sum(powers) / len(powers) if powers else 0.0,
+                "power_max": max(powers, default=0.0),
+                "mem_used": mem_used,
+                "mem_total": mem_total,
+                "per_gpu": [
+                    {
+                        "index": str(g.get("index")),
+                        "util": float(g.get("utilization") or 0.0),
+                        "temp": float(g.get("temperature") or 0.0),
+                        "power": float(g.get("power") or 0.0),
+                    }
+                    for g in gpus
+                ],
+            }
+        )
+
+    def series(self) -> dict:
+        """Aggregate avg/max series across GPUs (`per_gpu` kept for JSON use)."""
+        out = {
+            "gpu_util": [s["util_avg"] for s in self.samples],
+            "gpu_util_max": [s["util_max"] for s in self.samples],
+            "gpu_temp": [s["temp_max"] for s in self.samples],
+            "gpu_temp_avg": [s["temp_avg"] for s in self.samples],
+            "gpu_power": [s["power_sum"] for s in self.samples],
+            "gpu_power_avg": [s.get("power_avg", 0.0) for s in self.samples],
+            "gpu_power_max": [s.get("power_max", 0.0) for s in self.samples],
+            "gpu_mem_used": [s["mem_used"] for s in self.samples],
+            "per_gpu": {},
+        }
+        indices: list[str] = []
+        for s in self.samples:
+            for g in s["per_gpu"]:
+                if g["index"] not in indices:
+                    indices.append(g["index"])
+        for idx in indices:
+            utils: list[float] = []
+            temps: list[float] = []
+            for s in self.samples:
+                match = next((g for g in s["per_gpu"] if g["index"] == idx), None)
+                utils.append(match["util"] if match else 0.0)
+                temps.append(match["temp"] if match else 0.0)
+            out["per_gpu"][idx] = {"util": utils, "temp": temps}
+        return out
 
 
 def probe_service() -> dict:

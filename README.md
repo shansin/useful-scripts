@@ -141,10 +141,11 @@ sudo bash setup_sleep_schedule.sh --undo
 A live terminal dashboard for a local **Ollama** server. Ollama ships no Prometheus endpoint (`/metrics` is a 404), so this reconstructs history by parsing the service's systemd journal and combines it with live `/api/ps` and `nvidia-smi` readings. Lives in its own folder (`ollama-metrics/`) with its own `pyproject.toml`.
 
 ### ✨ Key Features
-- **📈 Request Metrics**: Total volume, error rate, req/min, and p50/p95/p99/max latency, broken down by endpoint.
-- **⚡ Token Throughput**: Generation and prompt-eval tok/s (avg, p50, p95) plus total tokens in and out.
+- **📈 Request Metrics**: Total volume, error rate, req/min, and p50/p95/p99/max latency, broken down by endpoint — plus filtered inference req/min and inference-only p95 (excludes `/api/ps` polling noise).
+- **⚡ Token Throughput**: Generation and prompt-eval tok/s (avg, p50, p95) plus total tokens in and out; parses current Ollama `prompt processing` / `n_gen` log formats.
+- **📊 Activity Graphs**: Cycle with `g` through req/min, inf req/min, inf done/min, p95, inf p95, gen/prompt tok/s, tokens out, GPU util/temp avg+max/power avg+max, errors — each with now + peak sparklines (multi-GPU values aggregated as avg/max).
 - **🧠 Per-Model Activity**: Inferences, average generation speed, load count, and average load time for each model.
-- **🎮 Live GPU State**: Resident models with VRAM use and keep-alive countdown, alongside per-GPU memory, utilisation, temperature, and power.
+- **🎮 Live GPU State + History**: Resident models with VRAM use and keep-alive countdown, alongside per-GPU memory, utilisation, temperature, and power — plus in-memory util/temp/power trend graphs (live-only, fill in after launch).
 - **🌐 Client Visibility**: Top client IPs — handy when the server answers over a LAN or Tailscale.
 - **🪶 Zero Dependencies**: Pure Python 3.12 standard library. Backfills history once, then follows `journalctl -f` on a background thread so refreshes stay cheap.
 
@@ -162,7 +163,7 @@ cd ollama-metrics
 ./ollama_metrics.py --json | jq .    # machine-readable snapshot
 ```
 
-Keys: `q` quit · `r` refresh · `w` cycle window (1h → 24h → 7d) · `p` pause.
+Keys: `q` quit · `r` refresh · `w` cycle window (1h → 24h → 7d) · `g` cycle graph · `p` pause.
 
 See [`ollama-metrics/README.md`](ollama-metrics/README.md) for the full flag list, data sources, and caveats.
 
