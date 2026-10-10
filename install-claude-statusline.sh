@@ -63,8 +63,8 @@ fi
 cat > "$TARGET" <<'STATUSLINE_EOF'
 #!/bin/bash
 # Claude Code status line: two lines.
-#   1: model · effort   path   git branch + state   cost
-#   2: gauges — context, cache, 5h/7d quotas (smooth bars, green→yellow→red for health)
+#   1: path   git branch + state   model · effort   cost
+#   2: gauges — context bar, cache time left, 5h/7d quotas (smooth bars, green→yellow→red for health)
 input=$(cat)
 
 N=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
@@ -95,6 +95,7 @@ IFS=$'\t' read -r model effort cwd ctx cost p5 r5 p7 r7 cexp cttl chit transcrip
 
 num() { case "$1" in ''|-|*[!0-9.]*) echo "";; *) printf '%.0f' "$1" 2>/dev/null;; esac; }
 now=$(date +%s)
+clock() { date -r "$1" "+$2" 2>/dev/null || date -d "@$1" "+$2" 2>/dev/null; }
 dur() { local s=$1; if [ "$s" -ge 86400 ]; then echo "$((s/86400))d$((s%86400/3600))h";
         elif [ "$s" -ge 3600 ]; then printf '%dh%02d' $((s/3600)) $((s%3600/60)); else echo "$((s/60))m"; fi; }
 
@@ -115,17 +116,10 @@ DOT=" ${MUT}·${N} "
 
 # ================= Line 1: who / where =================
 l1=""
-[ "$model" = "-" ] && model="Claude"
-l1+="${CYN}${B}◆ ${model}${N}"
-if [ "$effort" != "-" ]; then
-  case "$effort" in low) ecol=$SKY;; medium) ecol=$VIO;; high) ecol=$PNK;; *) ecol=$ORG;; esac
-  l1+="${DOT}${ecol}${effort}${N}"
-fi
-
 [ "$cwd" = "-" ] && cwd=$PWD
 short=$cwd
 case "$cwd" in "$HOME") short="~";; "$HOME"/*) short="~${cwd#"$HOME"}";; esac
-l1+="${SEP}${BLU}${B}${short}${N}"
+l1+="${BLU}${B}${short}${N}"
 
 # Git: branch, ahead/behind, staged / modified / untracked counts
 if [ -d "$cwd" ]; then
@@ -149,6 +143,13 @@ if [ -d "$cwd" ]; then
   fi
 fi
 
+[ "$model" = "-" ] && model="Claude"
+l1+="${SEP}${CYN}${B}◆ ${model}${N}"
+if [ "$effort" != "-" ]; then
+  case "$effort" in low) ecol=$SKY;; medium) ecol=$VIO;; high) ecol=$PNK;; *) ecol=$ORG;; esac
+  l1+="${DOT}${ecol}${effort}${N}"
+fi
+
 l1+="${SEP}${GOLD}$(printf '$%.2f' "${cost:-0}" 2>/dev/null)${N}"
 
 # ================= Line 2: gauges =================
@@ -159,10 +160,10 @@ c=$(num "$ctx")
 if [ -n "$c" ]; then
   [ "$c" -gt 100 ] && c=100
   col=$GRN; [ "$c" -ge 60 ] && col=$YEL; [ "$c" -ge 85 ] && col=$RED
-  l2+="${VIO}ctx${N} $(bar "$c" "$col") ${col}${B}${c}%${N}"
+  l2+="🧠 $(bar "$c" "$col") ${col}${B}${c}%${N}"
 fi
 
-# Cache: bar shows time LEFT before it goes cold
+# Cache: time LEFT before it goes cold
 case "$cttl" in *h) ttl=$(( ${cttl%h} * 3600 ));; *m) ttl=$(( ${cttl%m} * 60 ));; *) ttl=3600;; esac
 exp=$(num "$cexp")
 if [ -z "$exp" ] && [ -f "$transcript" ]; then   # fallback: last transcript write + TTL
@@ -172,30 +173,27 @@ fi
 if [ -n "$exp" ]; then
   left=$(( exp - now ))
   if [ "$left" -le 0 ]; then
-    l2+="${l2:+$SEP}${TEAL}cache${N} $(bar 0 "$MUT") ${RED}${B}cold${N}"
+    l2+="${l2:+$SEP}${TEAL}♨${N} ${RED}${B}cold${N}"
   else
-    pct=$(( left * 100 / ttl )); [ $pct -gt 100 ] && pct=100
-    col=$GRN; [ $pct -lt 20 ] && col=$YEL
-    at=$(date -r "$exp" +%H:%M 2>/dev/null || date -d "@$exp" +%H:%M 2>/dev/null)
-    l2+="${l2:+$SEP}${TEAL}cache${N} $(bar "$pct" "$col") ${col}${B}$(dur "$left")${N} ${MUT}→${at}${N}"
+    col=$GRN; [ $(( left * 100 / ttl )) -lt 20 ] && col=$YEL
+    l2+="${l2:+$SEP}${TEAL}♨${N} ${col}${B}$(dur "$left")${N}"
   fi
   # Only mention hit ratio when it's poor
   h=$(awk -v r="$chit" 'BEGIN{ if (r ~ /^[0-9.]+$/) printf "%d", r*100 }')
   [ -n "$h" ] && [ "$h" -lt 50 ] && l2+=" ${YEL}${h}% hit${N}"
 fi
 
-# Quotas: bar shows how much is LEFT; color by burn rate vs. time elapsed
+# Quotas: bar shows how much is LEFT (more left = greener), then time to reset and reset clock time
 quota() {
-  local label=$1 used=$(num "$2") reset=$3 win=$4
+  local label=$1 used=$(num "$2") reset=$3 win=$4 fmt=$5
   [ -z "$used" ] && return; [[ "$reset" =~ ^[0-9]+$ ]] || return
   local rem=$(( reset - now )); [ $rem -lt 0 ] && rem=0; [ $rem -gt "$win" ] && rem=$win
-  local elapsed=$(( (win - rem) * 100 / win )) left=$(( 100 - used )); [ $left -lt 0 ] && left=0
-  local col=$GRN
-  if [ "$used" -gt $((elapsed + 15)) ]; then col=$RED; elif [ "$used" -gt "$elapsed" ]; then col=$YEL; fi
-  l2+="${l2:+$SEP}${ORG}${label}${N} $(bar "$left" "$col") ${col}${B}${left}%${N} ${MUT}↻$(dur "$rem")${N}"
+  local left=$(( 100 - used )); [ $left -lt 0 ] && left=0
+  local col=$GRN; [ $left -lt 50 ] && col=$YEL; [ $left -lt 20 ] && col=$RED
+  l2+="${l2:+$SEP}${ORG}${label}${N} $(bar "$left" "$col") ${col}${B}${left}%${N} ${MUT}↻$(dur "$rem") →$(clock "$reset" "$fmt")${N}"
 }
-quota 5h "$p5" "$r5" 18000
-quota 7d "$p7" "$r7" 604800
+quota 5h "$p5" "$r5" 18000 %H:%M
+quota 7d "$p7" "$r7" 604800 '%a %H:%M'
 
 printf '%s\n' "$l1"
 if [ -n "$l2" ]; then printf '%s\n' "$l2"; fi
