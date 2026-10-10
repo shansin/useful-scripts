@@ -63,8 +63,8 @@ fi
 cat > "$TARGET" <<'STATUSLINE_EOF'
 #!/bin/bash
 # Claude Code status line: two lines.
-#   1: host   path   git branch + state   context bar
-#   2: cache time left, 5h/7d quotas (dot bars, green→yellow→red for health)   model · effort   cost
+#   1: host │ path │ git branch + state │ context bar │ session title
+#   2: cache time left │ 5h │ 7d quotas (dot bars, green→yellow→red for health) │ model · effort │ cost
 input=$(cat)
 
 N=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
@@ -73,7 +73,7 @@ GRN=$(fg 74 222 128); YEL=$(fg 250 204 21); RED=$(fg 248 113 113); CYN=$(fg 103 
 BLU=$(fg 129 140 248); PNK=$(fg 244 114 182); VIO=$(fg 192 132 252); TEAL=$(fg 45 212 191)
 ORG=$(fg 251 146 60); GOLD=$(fg 234 179 8); SKY=$(fg 125 211 252)
 
-IFS=$'\t' read -r model effort cwd ctx cost p5 r5 p7 r7 cexp cttl chit transcript < <(
+IFS=$'\t' read -r model effort cwd ctx cost p5 r5 p7 r7 cexp cttl chit transcript sname < <(
   printf '%s' "$input" | jq -r '[
     (.model.display_name // .model.id // "-"),
     (.effort.level // "-"),
@@ -87,7 +87,8 @@ IFS=$'\t' read -r model effort cwd ctx cost p5 r5 p7 r7 cexp cttl chit transcrip
     (.prompt_cache.expires_at // "-"),
     (.prompt_cache.ttl // "-"),
     (.prompt_cache.hit_ratio // "-"),
-    (.transcript_path // "-")
+    (.transcript_path // "-"),
+    (.session_name // "-" | gsub("[\t\n]"; " "))
   ] | map(tostring) | join("\t")' 2>/dev/null
 )
 
@@ -106,7 +107,7 @@ bar() {
   printf '%s%s%s%s%s' "$2" "$on" "$MUT" "$off" "$N"
 }
 
-SEP="   "
+SEP=" ${MUT}│${N} "
 DOT=" ${MUT}·${N} "
 
 # ================= Line 1: where + context =================
@@ -144,6 +145,12 @@ if [ -n "$c" ]; then
   [ "$c" -gt 100 ] && c=100
   col=$GRN; [ "$c" -ge 60 ] && col=$YEL; [ "$c" -ge 85 ] && col=$RED
   l1+="${SEP}🧠 $(bar "$c" "$col") ${col}${B}${c}%${N}"
+fi
+
+# Session title (/rename or AI-generated), truncated
+if [ "$sname" != "-" ] && [ -n "$sname" ]; then
+  [ ${#sname} -gt 40 ] && sname="${sname:0:39}…"
+  l1+="${SEP}${VIO}$(printf '\033[3m')${sname}${N}"
 fi
 
 # ================= Line 2: gauges + model / cost =================
