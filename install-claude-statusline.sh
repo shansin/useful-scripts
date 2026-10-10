@@ -63,17 +63,15 @@ fi
 cat > "$TARGET" <<'STATUSLINE_EOF'
 #!/bin/bash
 # Claude Code status line: two lines.
-#   1: path   git branch + state   model · effort   cost
-#   2: gauges — context bar, cache time left, 5h/7d quotas (smooth bars, green→yellow→red for health)
+#   1: host   path   git branch + state   context bar
+#   2: cache time left, 5h/7d quotas (dot bars, green→yellow→red for health)   model · effort   cost
 input=$(cat)
 
 N=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
 fg() { printf '\033[38;2;%s;%s;%sm' "$1" "$2" "$3"; }
-bg() { printf '\033[48;2;%s;%s;%sm' "$1" "$2" "$3"; }
 GRN=$(fg 74 222 128); YEL=$(fg 250 204 21); RED=$(fg 248 113 113); CYN=$(fg 103 232 249); MUT=$(fg 113 113 122)
 BLU=$(fg 129 140 248); PNK=$(fg 244 114 182); VIO=$(fg 192 132 252); TEAL=$(fg 45 212 191)
 ORG=$(fg 251 146 60); GOLD=$(fg 234 179 8); SKY=$(fg 125 211 252)
-TRACK=$(bg 39 39 46)
 
 IFS=$'\t' read -r model effort cwd ctx cost p5 r5 p7 r7 cexp cttl chit transcript < <(
   printf '%s' "$input" | jq -r '[
@@ -99,27 +97,24 @@ clock() { date -r "$1" "+$2" 2>/dev/null || date -d "@$1" "+$2" 2>/dev/null; }
 dur() { local s=$1; if [ "$s" -ge 86400 ]; then echo "$((s/86400))d$((s%86400/3600))h";
         elif [ "$s" -ge 3600 ]; then printf '%dh%02d' $((s/3600)) $((s%3600/60)); else echo "$((s/60))m"; fi; }
 
-# bar <pct 0-100> <color>: 8 cells on a dark track, 1/8-cell precision
-PART=("" "▏" "▎" "▍" "▌" "▋" "▊" "▉")
+# bar <pct 0-100> <color>: 8 dots, filled in color, hollow in gray
 bar() {
-  local w=8 units=$(( $1 * 64 / 100 )) out="" i
-  [ "$1" -gt 0 ] && [ $units -eq 0 ] && units=1
-  local full=$(( units / 8 )) rem=$(( units % 8 ))
-  for ((i=0;i<full;i++)); do out+="█"; done
-  [ $rem -gt 0 ] && { out+="${PART[$rem]}"; full=$((full + 1)); }
-  for ((i=full;i<w;i++)); do out+=" "; done
-  printf '%s%s%s%s' "$TRACK" "$2" "$out" "$N"
+  local w=8 n=$(( ($1 * 8 + 50) / 100 )) on="" off="" i
+  [ "$1" -gt 0 ] && [ $n -eq 0 ] && n=1
+  for ((i=0;i<n;i++)); do on+="●"; done
+  for ((i=n;i<w;i++)); do off+="○"; done
+  printf '%s%s%s%s%s' "$2" "$on" "$MUT" "$off" "$N"
 }
 
 SEP="   "
 DOT=" ${MUT}·${N} "
 
-# ================= Line 1: who / where =================
+# ================= Line 1: where + context =================
 l1=""
 [ "$cwd" = "-" ] && cwd=$PWD
 short=$cwd
 case "$cwd" in "$HOME") short="~";; "$HOME"/*) short="~${cwd#"$HOME"}";; esac
-l1+="${BLU}${B}${short}${N}"
+l1+="${TEAL}${HOSTNAME%%.*}${N}${SEP}${BLU}${B}${short}${N}"
 
 # Git: branch, ahead/behind, staged / modified / untracked counts
 if [ -d "$cwd" ]; then
@@ -143,25 +138,16 @@ if [ -d "$cwd" ]; then
   fi
 fi
 
-[ "$model" = "-" ] && model="Claude"
-l1+="${SEP}${CYN}${B}◆ ${model}${N}"
-if [ "$effort" != "-" ]; then
-  case "$effort" in low) ecol=$SKY;; medium) ecol=$VIO;; high) ecol=$PNK;; *) ecol=$ORG;; esac
-  l1+="${DOT}${ecol}${effort}${N}"
-fi
-
-l1+="${SEP}${GOLD}$(printf '$%.2f' "${cost:-0}" 2>/dev/null)${N}"
-
-# ================= Line 2: gauges =================
-l2=""
-
 # Context: bar shows how FULL it is
 c=$(num "$ctx")
 if [ -n "$c" ]; then
   [ "$c" -gt 100 ] && c=100
   col=$GRN; [ "$c" -ge 60 ] && col=$YEL; [ "$c" -ge 85 ] && col=$RED
-  l2+="🧠 $(bar "$c" "$col") ${col}${B}${c}%${N}"
+  l1+="${SEP}🧠 $(bar "$c" "$col") ${col}${B}${c}%${N}"
 fi
+
+# ================= Line 2: gauges + model / cost =================
+l2=""
 
 # Cache: time LEFT before it goes cold
 case "$cttl" in *h) ttl=$(( ${cttl%h} * 3600 ));; *m) ttl=$(( ${cttl%m} * 60 ));; *) ttl=3600;; esac
@@ -195,8 +181,16 @@ quota() {
 quota 5h "$p5" "$r5" 18000 %H:%M
 quota 7d "$p7" "$r7" 604800 '%a %H:%M'
 
-printf '%s\n' "$l1"
-if [ -n "$l2" ]; then printf '%s\n' "$l2"; fi
+[ "$model" = "-" ] && model="Claude"
+l2+="${l2:+$SEP}${CYN}${B}◆ ${model}${N}"
+if [ "$effort" != "-" ]; then
+  case "$effort" in low) ecol=$SKY;; medium) ecol=$VIO;; high) ecol=$PNK;; *) ecol=$ORG;; esac
+  l2+="${DOT}${ecol}${effort}${N}"
+fi
+
+l2+="${SEP}${GOLD}$(printf '$%.2f' "${cost:-0}" 2>/dev/null)${N}"
+
+printf '%s\n%s\n' "$l1" "$l2"
 STATUSLINE_EOF
 chmod +x "$TARGET"
 echo "Installed $TARGET"
