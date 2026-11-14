@@ -17,7 +17,9 @@
 #   Scope     / and /boot/efi, --one-file-system (skips /srv/data, /mnt/backup, /proc...).
 #             Includes /etc, /home (with ~/.ssh), /var/lib/docker (images + volumes),
 #             Ollama models, /opt. Excludes swap, tmp, apt debs, docker build cache,
-#             ~/.cache except huggingface, Trash, CACHEDIR.TAG-marked dirs.
+#             ~/.cache except huggingface, Trash. Deliberately NOT --exclude-caches: uv
+#             tags every .venv with CACHEDIR.TAG, so it would skip ~25 GB of venvs
+#             (sglang, manim, app backends) that are slow to rebuild.
 #   Metadata  Before each run: partition layout (sfdisk), filesystem UUIDs, EFI boot
 #             entries, package lists, docker images -> /var/backups/system-metadata
 #             (so it's inside every snapshot) and the restore kit.
@@ -409,7 +411,7 @@ cmd_run() {
   ok "saved to $META"
 
   step "Backup ${BACKUP_PATHS[*]}"
-  restic backup --one-file-system --exclude-caches --exclude-file "$EXCLUDES" \
+  restic backup --one-file-system --exclude-file "$EXCLUDES" \
     --tag system "${BACKUP_PATHS[@]}" || rc=$?
   case $rc in
     0) ok "snapshot created" ;;
