@@ -12,6 +12,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [passwordless-ssh-setup.sh (Passwordless SSH Setup)](#5-passwordless-ssh-setupsh---passwordless-ssh-setup)
 - [install-claude-statusline.sh (Claude Code Status Line)](#6-install-claude-statuslinesh---claude-code-status-line)
 - [recreate-mac-shell.sh (Mac zsh Prompt Setup)](#7-recreate-mac-shellsh---mac-zsh-prompt-setup)
+- [storage/setup-data-drive.sh (Encrypted Archive HDD Setup)](#8-storagesetup-data-drivesh---encrypted-archive-hdd-setup)
 - [Getting Started](#getting-started)
 
 ---
@@ -230,6 +231,42 @@ Recreates my zsh setup on a fresh Mac: a dependency-free `vcs_info` prompt (cwd 
 ```
 
 Any existing `~/.zshrc` is backed up to `~/.zshrc.bak.<timestamp>`. Run `exec zsh` afterwards. Run it from Terminal.app (with iTerm2 quit) so the default-profile switch sticks; otherwise pick the profile manually in iTerm2 settings.
+
+---
+
+## 💽 8. `storage/setup-data-drive.sh` - Encrypted Archive HDD Setup
+
+Builds or restores bigrig's 8 TB SATA archive disk (backups + video projects, idle most of the time): LUKS2 with TPM2 auto-unlock, ext4 at `/srv/data`, a hardened Samba share for the Mac, and tuning that lets the disk spin down safely. Run it after an OS reinstall and the disk comes back exactly as it was. Re-run it any time to fix drift.
+
+### ✨ Key Features
+- **♻️ Idempotent**: Each config file is rendered and compared first. Unchanged files are left alone, changed ones get a `.bak-<timestamp>` backup. A re-run on a configured box changes nothing.
+- **🛡️ Never formats by accident**: Plain runs only use an existing LUKS volume. Formatting needs `--format-new-disk`, a disk with no partitions or signatures, **and** typing the disk serial.
+- **🔐 TPM self-healing**: If the TPM2 binding no longer unseals (new machine, BIOS/Secure Boot change), it asks for the recovery passphrase once and re-enrolls to PCR 7.
+- **😴 Spin-down done right**: 30-min idle spin-down, smartd that never wakes a sleeping disk, and an hourly poll interval (30-min polls kept resetting the drive's idle timer).
+- **🩺 Monitoring**: SMART short test weekly, long test monthly, temperature warn/crit 45/55 °C, sysstat disk history, plus `--status`, which reports health without waking the disk.
+
+### 🚀 Usage
+
+> [!IMPORTANT]
+> Must be run as **root**. Apply mode spins the disk up once (reading the LUKS header). `--status` won't wake it.
+
+```bash
+sudo bash storage/setup-data-drive.sh                    # apply / restore (never formats)
+sudo bash storage/setup-data-drive.sh --status           # health, sleep state, recent wake-ups
+sudo bash storage/setup-data-drive.sh --format-new-disk  # first-time setup of a BLANK disk
+
+# replacement disk:
+DISK=/dev/disk/by-id/ata-<model>_<serial> sudo -E bash storage/setup-data-drive.sh --format-new-disk
+```
+
+Interface names, subnets, mount point and schedules are in the config block at the top.
+
+### 🔧 What It Manages
+- **Disk**: GPT partition (4K-aligned, type 8309) → LUKS2 (4K sectors, passphrase + TPM2 PCR 7) → ext4 (`-m 0`). `/etc/crypttab` and `/etc/fstab` both use `nofail`. The mountpoint is `chattr +i` underneath.
+- **Share**: `/etc/samba/smb.conf` (SMB3-only on 445, LAN + Tailscale only, macOS fruit, recycle bin). nmbd masked, ufw rules for 445/tcp + mDNS.
+- **Purge**: `samba-recycle-purge.{service,timer}` + `timer.d/weekly.conf` delete `.recycle` items older than 30 days, Sundays at 03:05.
+- **Longevity**: `/etc/hdparm.conf` (spindown 241 = 30 min), `/etc/smartd.conf` entry (`-n standby,48,q`), `/etc/default/smartmontools` (`--interval=3600`).
+- **Safety copies**: `/root/luks-header-<serial>.img` (copy it off the box) and `/root/smart-baseline-<serial>.txt`.
 
 ---
 
