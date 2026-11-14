@@ -132,6 +132,32 @@ EOF
 }
 
 # ------------------------------------------------------------------ metadata + restore kit
+# Turn an `sfdisk -d` dump (stdin) into a layout that fits ANY replacement disk: same partition
+# numbers, types, PARTUUIDs and disk label-id, positions in MiB (independent of 512/4096-byte
+# sectors), and the physically last partition (root) grows/shrinks to fill the disk.
+# $1 = logical sector size of the dumped disk. Exits 3 if a partition isn't MiB-aligned.
+render_fill_layout() {
+  awk -v ss="$1" '
+    /^label:/ || /^label-id:/ { print; next }
+    /^\/dev\// {
+      n++; name[n] = $1
+      v = $0; sub(/.*start= */, "", v); sub(/,.*/, "", v); st[n] = v + 0
+      v = $0; sub(/.*size= */, "", v);  sub(/,.*/, "", v); sz[n] = v + 0
+      v = $0; sub(/.*size= *[0-9]+, */, "", v); attrs[n] = v
+      if (n == 1 || st[n] > st[last]) last = n
+    }
+    END {
+      print ""
+      for (i = 1; i <= n; i++) {
+        sb = st[i] * ss; zb = sz[i] * ss
+        if (sb % 1048576 || zb % 1048576) exit 3
+        printf "%s : start=%dMiB, ", name[i], sb / 1048576
+        if (i != last) printf "size=%dMiB, ", zb / 1048576
+        print attrs[i]
+      }
+    }'
+}
+
 collect_metadata() {
   local root_src root_disk esp_src swap_bytes=0 data_disk
   root_src=$(findmnt -no SOURCE /)
@@ -144,6 +170,9 @@ collect_metadata() {
 
   mkdir -p "$META"
   sfdisk -d "$root_disk"                       > "$META/sfdisk.txt"
+  if ! render_fill_layout "$(lsblk -dno LOG-SEC "$root_disk" | xargs)" < "$META/sfdisk.txt" > "$META/layout.sfdisk"; then
+    rm -f "$META/layout.sfdisk"; warn "partitions not MiB-aligned: the guide falls back to the exact sfdisk.txt"
+  fi
   lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,UUID,PARTUUID,MOUNTPOINTS > "$META/lsblk.txt"
   blkid                                        > "$META/blkid.txt" || true
   cp /etc/fstab "$META/fstab"
@@ -168,6 +197,7 @@ ROOT_LABEL=$(lsblk -no LABEL "$root_src")
 ESP_PART=$esp_src
 ESP_UUID=$( [[ -n $esp_src ]] && lsblk -no UUID "$esp_src")
 SWAP_BYTES=$swap_bytes
+ROOT_USED_GB=$(( $(df -B1 --output=used / | tail -1) / 1000000000 ))
 DATA_DISK=/dev/$data_disk
 DATA_DISK_MODEL="$(lsblk -dno MODEL "/dev/$data_disk" | xargs)"
 DATA_DISK_SERIAL=$(lsblk -dno SERIAL "/dev/$data_disk")
@@ -190,7 +220,11 @@ render_restore_doc() {  # $1 = latest snapshot description
   # shellcheck disable=SC1091
   source "$META/restore-info.env"
   local esp_serial=${ESP_UUID//-/} r_flags pw_need pw_note
-  local root_sfx=${ROOT_PART#"$ROOT_DISK"} esp_sfx=${ESP_PART#"$ROOT_DISK"}
+  local root_sfx=${ROOT_PART#"$ROOT_DISK"} esp_sfx=${ESP_PART#"$ROOT_DISK"} layout="layout.sfdisk"
+  local layout_note="# same partitions + IDs; root is resized to fill THIS disk (any size/model)"
+  if [[ ! -s $META/layout.sfdisk ]]; then
+    layout="sfdisk.txt"; layout_note="# exact old layout: the new disk must be at least as big as the old one"
+  fi
   if [[ -s $PASSFILE ]]; then
     r_flags="--no-lock"
     pw_need="[ ] Your RESTIC password (password manager); restic asks for it"
@@ -222,7 +256,8 @@ WHEN TO USE THIS
   The data disk is only READ, never changed.
 
 WHAT YOU NEED
-  [ ] A replacement NVMe at least as big as the old one ($ROOT_DISK_BYTES bytes, ~2 TB)
+  [ ] A replacement NVMe: any brand/model/size above ~$(( ROOT_USED_GB + 100 )) GB (root had ~$ROOT_USED_GB GB
+        in use at last backup). Old disk was ~$(( ROOT_DISK_BYTES / 1000000000 )) GB; that size or bigger is ideal.
   [ ] A USB stick (8 GB+), written on any computer:
         Ubuntu Desktop 26.04 from https://ubuntu.com/download/desktop
         written with balenaEtcher (Mac/Windows) or Rufus (Windows)
@@ -234,6 +269,7 @@ DISKS IN THIS MACHINE AT LAST BACKUP: identify disks by MODEL + SERIAL, names ca
 $(cat "$META/disks.txt")
   !! Two disks can be about the same size. ALWAYS confirm model + serial before
      erasing anything (step 3).
+  A brand-new replacement disk is NOT in this list: it's the one with no partitions.
 
 --------------------------------------------------------------------------
 STEP 1  Boot the USB stick
@@ -256,34 +292,39 @@ $pw_note}
 
 STEP 3  Choose the TARGET disk. IT WILL BE ERASED.
   lsblk -d -o NAME,SIZE,MODEL,SERIAL
-  T=/dev/nvme1n1        # <- set this to the NEW root disk. Check model + serial!
+  T=/dev/nvme1n1        # <- set this to the NEW root disk (no partitions yet). Check model + serial!
 
 STEP 4  Partition and format it with the old IDs (so the boot setup works unchanged)
-  sfdisk \$T < \$KIT/metadata/sfdisk.txt
+  sfdisk \$T < \$KIT/metadata/$layout      $layout_note
+  udevadm settle                          # wait until the new partition devices exist
   lsblk \$T                                # expect 2 partitions: big root + 1 GB EFI
-  ROOT=\${T}$root_sfx   ESP=\${T}$esp_sfx
+  ROOT=\${T}$root_sfx   ESP=\${T}$esp_sfx     # NVMe naming; a SATA disk (/dev/sdX) has no "p": \${T}1
   mkfs.vfat -F 32 -i $esp_serial \$ESP
   mkfs.ext4 -U $ROOT_UUID ${ROOT_LABEL:+-L $ROOT_LABEL }\$ROOT
 
-STEP 5  Restore everything (40-60 min, progress is shown)
+STEP 5  Restore everything (about 1 hour, progress is shown)
   mkdir -p /mnt/root && mount \$ROOT /mnt/root
   mkdir -p /mnt/root/boot/efi && mount \$ESP /mnt/root/boot/efi
-  \$R restore latest --target /mnt/root
+  \$R restore latest --sparse --target /mnt/root
   # older backup instead? replace "latest" with an ID from "\$R snapshots"
 
 STEP 6  Recreate what the backup skips on purpose
   mkdir -p /mnt/root/{proc,sys,dev,run,tmp,var/tmp,srv/data,mnt/backup}
   chmod 1777 /mnt/root/tmp /mnt/root/var/tmp
+  chattr +i /mnt/root/srv/data            # lock the empty mountpoint (restic can't restore this flag),
+                                          # so nothing lands on the root disk if the data disk isn't mounted
   fallocate -l $SWAP_BYTES /mnt/root/swap.img && chmod 600 /mnt/root/swap.img && mkswap /mnt/root/swap.img
 
 STEP 7  Make it bootable
   for d in dev dev/pts proc sys sys/firmware/efi/efivars run; do mount --bind /\$d /mnt/root/\$d; done
-  chroot /mnt/root grub-install
+  chroot /mnt/root grub-install --target=x86_64-efi --efi-directory=/boot/efi
   chroot /mnt/root update-grub
-  chroot /mnt/root dracut --regenerate-all --force
+  efibootmgr -v | grep -i ubuntu          # must show an "ubuntu" entry before you reboot
+  # (The kernel/initramfs come back from the backup unchanged, so no rebuild is needed.)
 
 STEP 8  Reboot
-  umount -R /mnt/root; umount /mnt/data; reboot       # pull out the USB stick
+  umount -R /mnt/root; umount /mnt/data; cryptsetup close data
+  reboot                                  # pull out the USB stick
   Doesn't boot? Tap F8 and pick "ubuntu" on the new disk.
 
 STEP 9  After the first boot
@@ -298,14 +339,15 @@ STEP 9  After the first boot
 IF SOMETHING GOES WRONG
   * "\$KIT/restic: No such file": the kit is missing. With internet:
         apt update && apt install -y restic      then use  R="restic $r_flags"
-  * New disk is SMALLER and sfdisk refuses the layout:
-        cp \$KIT/metadata/sfdisk.txt /tmp/layout.txt
-        edit /tmp/layout.txt: delete the "last-lba:" line, and delete "size=..., "
-        from the ROOT partition's line (root is the last partition, so it fills the disk)
-        sfdisk \$T < /tmp/layout.txt
+  * Restore fails with "no space left on device": the new disk is too small for the
+    restored data (root had ~$ROOT_USED_GB GB in use). Use a bigger disk; start again from step 4.
   * restore prints errors about ownership/permissions under /boot/efi: harmless
     (the EFI partition is FAT, which can't store them). Other errors: re-run it.
   * The restore stopped halfway: run the same restore command again.
+  * Boot stops at a "dracut" emergency shell (initramfs problem): boot the USB, redo
+    steps 2, 5 (mount commands only) and the bind-mount line of 7, then:
+        chroot /mnt/root dracut --regenerate-all --force
+        chroot /mnt/root update-grub
   * Stuck at a "grub>" prompt or no boot entry: boot the USB again, redo steps 2, 5
     (mount commands only), and 7.
   * Only the DATA disk died (Linux is fine): none of this applies. Put in the new
@@ -442,11 +484,13 @@ cmd_status() {
   need_root
   step "Last successful run"
   if [[ -f $STATE/last-success ]]; then
-    local epoch age_h
+    local epoch age_h last_rc
     read -r epoch _ < "$STATE/last-success"
     age_h=$(( ( $(date +%s) - epoch ) / 3600 ))
+    last_rc=$(grep -o 'rc=[0-9]*' "$STATE/last-success" | cut -d= -f2)
     info "$(cut -d' ' -f2- "$STATE/last-success")  (${age_h}h ago)"
     (( age_h <= 36 )) || warn "older than 36h: check  journalctl -u $UNIT"
+    [[ ${last_rc:-0} == 0 ]] || warn "last run skipped some unreadable files (rc=$last_rc): see  journalctl -u $UNIT"
   else
     warn "never"
   fi
