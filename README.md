@@ -239,6 +239,9 @@ Any existing `~/.zshrc` is backed up to `~/.zshrc.bak.<timestamp>`. Run `exec zs
 
 Builds or restores bigrig's 8 TB SATA archive disk (backups + video projects, idle most of the time): LUKS2 with TPM2 auto-unlock, ext4 at `/srv/data`, a hardened Samba share for the Mac, and tuning that lets the disk spin down safely. Run it after an OS reinstall and the disk comes back exactly as it was. Re-run it any time to fix drift.
 
+> [!NOTE]
+> **How it fits with [`system-backup.sh`](#9-storagesystem-backupsh---whole-system-restic-backup):** this script sets up the *data disk*. `system-backup.sh` backs up the *root disk* onto it every night. A full restore brings back this disk's config files too, but not what lives outside them. You still need this script to re-link the disk to a new TPM (motherboard swap, BIOS change, header repair), to set up a replacement data disk, to rebuild without a backup, and to keep the LUKS header backup current.
+
 ### ✨ Key Features
 - **♻️ Idempotent**: Each config file is rendered and compared first. Unchanged files are left alone, changed ones get a `.bak-<timestamp>` backup. A re-run on a configured box changes nothing.
 - **🛡️ Never formats by accident**: Plain runs only use an existing LUKS volume. Formatting needs `--format-new-disk`, a disk with no partitions or signatures, **and** typing the disk serial.
@@ -269,6 +272,49 @@ Interface names, subnets, mount point and schedules are in the config block at t
 - **Longevity**: `/etc/hdparm.conf` (spindown 241 = 30 min), `/etc/smartd.conf` entry (`-n standby,48,q`), `/etc/default/smartmontools` (`--interval=3600`).
 - **Safety copies**: `/root/luks-header-<serial>.img` (copy it off the box) and `/root/smart-baseline-<serial>.txt`.
 
+### 🧯 When Things Go Wrong
+
+**The TPM is only a convenience.** It saves typing the passphrase at boot. LUKS slot 0 is the passphrase, and the passphrase alone opens the disk on any Linux machine. If the motherboard or CPU dies, connect the disk to any PC (spare SATA port or a USB-to-SATA adapter), boot an Ubuntu live USB and run:
+
+```bash
+sudo cryptsetup open --readonly /dev/sdX1 data   # asks the passphrase
+sudo mkdir -p /mnt/data && sudo mount -o ro /dev/mapper/data /mnt/data
+```
+
+On a new motherboard, enable the firmware TPM (AMD fTPM) in the BIOS and re-run this script. It asks for the passphrase once and re-links the disk to the new TPM. Until then Linux still boots, because the disk is `nofail`. It just won't mount.
+
+**Why the LUKS header backup matters even though you know the passphrase.** The data is encrypted with a random master key. The header (first 16 MB of the partition) stores that key, locked by the passphrase and the TPM. If the header is damaged (bad sectors, formatting the wrong disk, a stray `dd`, clicking through Windows' "Initialize disk"), the passphrase has nothing to unlock. All 8 TB is then gone for good, even though the data is intact. LUKS2 keeps two copies of the header metadata, but only one copy of the locked key.
+
+| What fails | Without the header copy | With it |
+|---|---|---|
+| Root NVMe dies, data disk fine | Restore from restic (section 9) | not needed |
+| **Data-disk header damaged, NVMe fine** | **All videos + all backups lost** | `luksHeaderRestore`, everything back |
+| Both | Everything lost | Fix the header, then restore from restic |
+
+Copy the header off the box once, and store it **off the data disk** (a password-manager attachment works well). From the Mac:
+
+```bash
+# on bigrig: a temporary copy you own, plus its checksum
+sudo install -m 600 -o "$USER" -g "$USER" /root/luks-header-<serial>.img ~/ && sha256sum ~/luks-header-<serial>.img
+# on the Mac: fetch it and compare the checksum
+scp <user>@bigrig-linux.local:luks-header-<serial>.img ~/Desktop/ && shasum -a 256 ~/Desktop/luks-header-<serial>.img
+# on bigrig: remove the temporary copy
+rm ~/luks-header-<serial>.img
+```
+
+Going through the Samba share instead? Delete the copy on Linux with `rm`. Deleting it in Finder only moves it to the share's `.recycle` folder, which is on the same disk.
+
+Restoring a damaged header (from a live USB): test it first without writing anything, then make it permanent:
+
+```bash
+sudo cryptsetup open --readonly --header luks-header-<serial>.img /dev/sdX1 data   # data visible? then:
+sudo cryptsetup close data
+sudo cryptsetup luksHeaderRestore /dev/sdX1 --header-backup-file luks-header-<serial>.img
+```
+
+> [!WARNING]
+> Protect the header file as you would the passphrase: the file plus the passphrase it was made with opens the disk. After **changing the passphrase**, make a new header backup and delete the old one. The old one still opens with the old passphrase. Re-running this script writes the new backup and keeps the previous one as `/root/luks-header-<serial>.img.bak-<stamp>`. Delete that `.bak`, then copy the new file off the box again. A TPM re-enroll also rewrites the header, but your off-box copy still works with the passphrase.
+
 ---
 
 ## 🗄️ 9. `storage/system-backup.sh` - Whole-System restic Backup
@@ -297,6 +343,29 @@ sudo system-backup run --maintenance         # force prune + verify
 - `/usr/local/sbin/system-backup` (a copy of this script), `/etc/restic/bigrig-linux.excludes`
 - `/root/.config/restic/bigrig-linux.pass` (0600), only if you set a password
 - `/etc/systemd/system/system-backup.{service,timer}`
+
+### 🧯 Recovery Scenarios
+
+The full copy-paste commands for every case are in `Backups/README-RESTORE.txt`. Keep a copy off the data disk and re-copy it after big changes (new disks, new passphrase).
+
+| Situation | What to do |
+|---|---|
+| Root NVMe died, got wiped, or Linux won't boot | Guide steps 1–9: Ubuntu live USB → unlock data disk read-only → partition any new NVMe (root fills it) → `restic restore` → `grub-install`. About 1.5 h. |
+| Motherboard/CPU died, disks fine | Same steps on the new board; nothing is tied to the old one. To just read the data, plug the 8 TB disk into any Linux PC (section 8). After the first boot, enable fTPM and re-run `setup-data-drive.sh`. |
+| Only need some files back | `restic ls latest /path` to browse, then `restic restore latest --include /path --target /tmp/restored`. Works on a running bigrig or from a live USB. |
+| Data disk rejects the correct passphrase | Damaged LUKS header: restore it from the header backup (section 8). |
+| Only the data disk died | `setup-data-drive.sh --format-new-disk`, then `system-backup.sh install`. Backup history starts over. |
+
+Quick check that a backup can be read back (about 2 minutes):
+
+```bash
+sudo restic -r /srv/data/Backups/bigrig-linux restore latest --include /etc --target /tmp/drill
+sudo diff -rq /etc /tmp/drill/etc | head -20   # nothing, or only files changed since the snapshot
+sudo rm -rf /tmp/drill
+```
+
+> [!NOTE]
+> From the Mac, `bigrig-linux/` and `bigrig-linux-restore/` show a red "no entry" badge. That's intended: they're root-only (0700), so nothing on the Mac can change or delete the backups. The restore runs as root, from a live USB or on bigrig itself.
 
 ---
 

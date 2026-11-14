@@ -241,6 +241,7 @@ render_restore_doc() {  # $1 = latest snapshot description
 Regenerated automatically on every backup. Do not edit (it gets replaced).
 KEEP A COPY OFF THIS DISK (Mac, phone, printout): you can only read this one after
 step 2, unlocking the data disk. It's on the "data" share as Backups/README-RESTORE.txt.
+Re-copy it after big changes (new disks, new passphrase).
 Last refreshed: $(date '+%F %R %Z')      Latest snapshot: $1
 
 WHAT IS IN THIS FOLDER  (Backups/ on the 8TB data disk)
@@ -249,10 +250,18 @@ WHAT IS IN THIS FOLDER  (Backups/ on the 8TB data disk)
   $HOST-restore/    restore kit: restic program, disk layout, package lists,
                          the backup script, and a copy of this guide (RESTORE.txt)
   README-RESTORE.txt     this file
+  From the Mac the two folders show a red "no entry" badge: intended. They're
+  root-only, so nothing on the Mac (a mistake, ransomware) can change or delete them.
 
-WHEN TO USE THIS
-  The root NVMe ($ROOT_DISK_MODEL) died, got wiped, or Linux is broken beyond
-  repair. This rebuilds it EXACTLY as of the last snapshot, in about 1.5 hours.
+WHICH SITUATION ARE YOU IN?
+  Root NVMe died, got wiped, or Linux won't boot  -> WHAT YOU NEED, then STEPS 1-9
+  Motherboard/CPU died, disks are fine            -> STEPS 1-9 on the new board, or
+                                                     "ANOTHER COMPUTER" (below) to just read
+  Only need some files back, not the whole system -> "GET INDIVIDUAL FILES BACK" (below)
+  Data disk rejects the CORRECT passphrase        -> "DATA DISK WON'T UNLOCK" (below)
+  Only the data disk died, Linux is fine          -> last item of "IF SOMETHING GOES WRONG"
+
+  Steps 1-9 rebuild the root disk EXACTLY as of the last snapshot, in about 1.5 hours.
   The data disk is only READ, never changed.
 
 WHAT YOU NEED
@@ -264,6 +273,7 @@ WHAT YOU NEED
   [ ] The DATA-DISK passphrase (password manager)
   $pw_need
   [ ] ~1.5 hours, a keyboard and a monitor on this machine
+  [ ] Only if the data disk won't unlock: luks-header-$DATA_DISK_SERIAL.img (password manager)
 
 DISKS IN THIS MACHINE AT LAST BACKUP: identify disks by MODEL + SERIAL, names can change
 $(cat "$META/disks.txt")
@@ -331,7 +341,9 @@ STEP 9  After the first boot
   - Log in normally. Docker apps (T3, numz) start by themselves; check:  docker ps
   - /srv/data should mount by itself. If it doesn't (new motherboard/TPM, BIOS reset):
       sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh
-    (asks the data-disk passphrase once and re-links it to the TPM)
+    (asks the data-disk passphrase once and re-links it to the TPM). It stops if it
+    finds no TPM: on a new board, turn on the firmware TPM (AMD fTPM) in the BIOS first.
+    Linux boots fine without /srv/data meanwhile (the disk is marked "nofail").
   - Turn backups back on:  sudo bash ~/code/useful-scripts/storage/system-backup.sh install
   - Anything broken?       systemctl --failed
 
@@ -354,6 +366,54 @@ IF SOMETHING GOES WRONG
     disk and run:  sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh --format-new-disk
     then  sudo bash ~/code/useful-scripts/storage/system-backup.sh install
     (backup history starts over unless another copy exists elsewhere)
+
+--------------------------------------------------------------------------
+READ THE DATA DISK ON ANOTHER COMPUTER  (motherboard/CPU died, TPM gone)
+  The TPM only saves typing the passphrase at boot. The passphrase alone opens
+  the disk on any Linux machine.
+  - Connect the 8TB disk ($DATA_DISK_MODEL, serial $DATA_DISK_SERIAL) to any PC:
+    a spare SATA port, or a USB-to-SATA adapter/dock.
+  - Boot the Ubuntu USB stick there (or use any Linux machine), open a terminal:
+      sudo -i
+  - Do STEP 2. Videos, backups and this kit are now under /mnt/data, read-only.
+    (As root, the root-only folders the Mac can't open are readable.)
+  - Rebuilding on a new motherboard or PC: STEPS 1-9 work as written; nothing in the
+    backup is tied to the old board. Mind the TPM note in step 9.
+
+GET INDIVIDUAL FILES BACK  (no full restore)
+  From a live USB / another computer, do STEP 2 first. On a working $HOST, instead:
+      sudo -i
+      R="restic -r /srv/data/Backups/$HOST $r_flags"
+  Then:
+      \$R snapshots                                    # pick "latest" or an older ID
+      \$R ls latest /home/shsin/code                   # browse what's in a snapshot
+      \$R restore latest --include /home/shsin/code --target /tmp/restored
+  Files land under /tmp/restored/home/shsin/code, owned like the originals.
+  Copy what you need back, then:  rm -rf /tmp/restored
+  (On a live USB, /tmp is RAM: for more than a few GB, --target a mounted disk.)
+
+DATA DISK WON'T UNLOCK, even with the correct passphrase
+  Rule out typos first: the live USB uses a US keyboard layout, so type the
+  passphrase into a text editor to see what comes out.
+  Why it can happen: the disk is encrypted with a random MASTER KEY. The LUKS
+  header (first 16 MB of the partition) stores that key, locked by your passphrase.
+  If the header is damaged (bad sectors, formatting the wrong disk, a stray dd or
+  Windows "Initialize disk"), the passphrase has nothing left to unlock, even
+  though all the data is still there. The header backup fixes it:
+  - The file: luks-header-$DATA_DISK_SERIAL.img, in your password manager (the original
+    is in /root on the old root disk). Get it onto the live session (download it
+    in Firefox, or copy from a USB stick), then cd to it: cd /home/ubuntu/Downloads
+  - Check:  cryptsetup luksDump /dev/sdX1     # errors / "not a valid LUKS device" = damaged
+  - Test with the backup WITHOUT writing anything to the disk:
+      cryptsetup open --readonly --header luks-header-$DATA_DISK_SERIAL.img /dev/sdX1 data
+      mkdir -p /mnt/data && mount -o ro /dev/mapper/data /mnt/data && ls /mnt/data
+  - Data visible? Make the fix permanent (writes ONLY the header):
+      umount /mnt/data; cryptsetup close data
+      cryptsetup luksHeaderRestore /dev/sdX1 --header-backup-file luks-header-$DATA_DISK_SERIAL.img
+    then carry on with STEP 2 as normal.
+  - It takes the passphrase that was current when the backup was made. If you
+    changed the passphrase since, use the old one.
+  - Afterwards, on $HOST, re-link the TPM: sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh
 EOF
 }
 
