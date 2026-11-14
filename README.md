@@ -13,6 +13,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [install-claude-statusline.sh (Claude Code Status Line)](#6-install-claude-statuslinesh---claude-code-status-line)
 - [recreate-mac-shell.sh (Mac zsh Prompt Setup)](#7-recreate-mac-shellsh---mac-zsh-prompt-setup)
 - [storage/setup-data-drive.sh (Encrypted Archive HDD Setup)](#8-storagesetup-data-drivesh---encrypted-archive-hdd-setup)
+- [storage/system-backup.sh (Whole-System restic Backup)](#9-storagesystem-backupsh---whole-system-restic-backup)
 - [Getting Started](#getting-started)
 
 ---
@@ -267,6 +268,35 @@ Interface names, subnets, mount point and schedules are in the config block at t
 - **Purge**: `samba-recycle-purge.{service,timer}` + `timer.d/weekly.conf` delete `.recycle` items older than 30 days, Sundays at 03:05.
 - **Longevity**: `/etc/hdparm.conf` (spindown 241 = 30 min), `/etc/smartd.conf` entry (`-n standby,48,q`), `/etc/default/smartmontools` (`--interval=3600`).
 - **Safety copies**: `/root/luks-header-<serial>.img` (copy it off the box) and `/root/smart-baseline-<serial>.txt`.
+
+---
+
+## 🗄️ 9. `storage/system-backup.sh` - Whole-System restic Backup
+
+Nightly [restic](https://restic.net) backup of the entire bigrig-linux root disk to the encrypted data disk (`/srv/data/Backups/bigrig-linux`). Each run also writes an offline **restore kit**, so a wiped machine can go from an Ubuntu live USB back to its exact state in about an hour.
+
+### ✨ Key Features
+- **💯 Whole system**: `/` + `/boot/efi` on one filesystem: `/etc`, `/home` (including `~/.ssh`), Docker images and volumes, Ollama models, `/opt`. Skips swap, tmp, apt debs, Docker build cache, and `~/.cache` (except `huggingface`).
+- **🔑 Your password, or none**: `install` asks for a restic password. Your own is saved root-only (`/root/.config/restic/bigrig-linux.pass`, 0600) so nightly runs are unattended. Press Enter for none (`--insecure-no-password`), and the LUKS data disk's encryption plus root-only 0700 permissions still protect the repo.
+- **🧰 Restore kit + doomsday guide**: `Backups/README-RESTORE.txt` is a step-by-step "root NVMe died" walkthrough, regenerated every run with this machine's disks (model/serial/role), IDs and copy-paste live-USB commands. `Backups/bigrig-linux-restore/` holds a restic binary, the partition layout and package lists, so it works without internet. Keep a copy of the guide off the disk too.
+- **⏰ Hands-off**: systemd timer at 04:45 (after the app DB dumps), catches up after downtime, lowest CPU priority. Keeps 7 daily / 4 weekly / 6 monthly / 1 yearly. Sundays add prune + `restic check --read-data-subset=5%`.
+
+### 🚀 Usage
+
+> [!IMPORTANT]
+> Must be run as **root**. Restoring needs the data-disk passphrase, plus your restic password if you set one. Keep both in your password manager.
+
+```bash
+sudo bash storage/system-backup.sh install   # repo (asks for a password), excludes, timer (idempotent)
+sudo system-backup run                       # first backup now (~420 GB, about an hour)
+sudo system-backup status                    # snapshots, last success, next run
+sudo system-backup run --maintenance         # force prune + verify
+```
+
+### 🔧 What It Installs
+- `/usr/local/sbin/system-backup` (a copy of this script), `/etc/restic/bigrig-linux.excludes`
+- `/root/.config/restic/bigrig-linux.pass` (0600), only if you set a password
+- `/etc/systemd/system/system-backup.{service,timer}`
 
 ---
 
