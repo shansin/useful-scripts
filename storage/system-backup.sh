@@ -14,7 +14,7 @@
 #             password manager too) or press Enter for none (--insecure-no-password,
 #             restic >= 0.17; the disk encryption still protects it). Copying the repo to
 #             unencrypted media? `restic copy` it into a password-protected repo instead.
-#   Scope     / and /boot/efi, --one-file-system (skips /srv/data, /mnt/backup, /proc...).
+#   Scope     / and /boot/efi, --one-file-system (skips /srv/data, /scratch, /proc...).
 #             Includes /etc, /home (with ~/.ssh), /var/lib/docker (images + volumes),
 #             Ollama models, /opt. Excludes swap, tmp, apt debs, docker build cache,
 #             ~/.cache except huggingface, Trash. Deliberately NOT --exclude-caches: uv
@@ -30,6 +30,13 @@
 #   Schedule  04:45 nightly (after the T3 03:30 / numz 04:15 DB dumps), catches up after
 #             downtime. Lowest CPU priority. Keep 7 daily / 4 weekly / 6 monthly / 1 yearly.
 #             Sundays: prune + `restic check --read-data-subset=5%`.
+#   2nd copy  After each run, `restic copy` sends the new snapshots to a second repo on
+#             len-linux over SFTP (Tailscale), same password + retention, so the backups
+#             survive the data disk (or this whole box) dying. Root uses a dedicated key
+#             (/root/.ssh/restic-bigrig-linux) that len-linux only allows for SFTP, as a
+#             dedicated `restic` user. `install` prints the one-time len-linux commands.
+#             A failed copy never blocks the local backup; the run exits 1 and `status`
+#             flags it. Set REMOTE_HOST= (empty) to turn the second copy off.
 set -euo pipefail
 
 # ------------------------------------------------------------------ config
@@ -47,6 +54,13 @@ SCHEDULE='*-*-* 04:45:00'
 KEEP=(--keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 1)
 CHECK_SUBSET=5%
 BACKUP_PATHS=(/ /boot/efi)
+# Second copy (empty REMOTE_HOST = off). Tailscale name, so it works wherever len-linux lives.
+REMOTE_HOST=len-linux.encke-chicken.ts.net
+REMOTE_LAN_HINT=192.168.1.31                 # len-linux on the home LAN (for a live-USB restore)
+REMOTE_USER=restic
+REMOTE_PATH=/home/restic/$NAME
+SSH_KEY=/root/.ssh/restic-$NAME
+SSH_KNOWN=/root/.ssh/known_hosts.restic
 
 export RESTIC_REPOSITORY=$REPO
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -82,6 +96,56 @@ need_root()  { [[ $EUID -eq 0 ]] || die "run with sudo"; }
 need_mount() { mountpoint -q "$DATA_MNT" || die "$DATA_MNT is not mounted (data disk locked or missing?)"; }
 repo_ready() { [[ -f $REPO/config ]]; }
 
+# ------------------------------------------------------------------ second copy (len-linux)
+remote_enabled() { [[ -n $REMOTE_HOST ]]; }
+remote_url()     { echo "sftp:$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"; }
+ssh_opts() {
+  echo "-i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15" \
+       "-o ServerAliveInterval=30 -o ServerAliveCountMax=6" \
+       "-o UserKnownHostsFile=$SSH_KNOWN -o StrictHostKeyChecking=accept-new"
+}
+rrestic() { restic -r "$(remote_url)" -o sftp.args="$(ssh_opts)" "$@"; }
+# source-repo flags for `init --copy-chunker-params` / `copy` (same password mode as local)
+from_args() {
+  FROM=(--from-repo "$REPO")
+  if [[ -s $PASSFILE ]]; then FROM+=(--from-password-file "$PASSFILE")
+  else FROM+=(--from-insecure-no-password); fi
+}
+# sftp_batch "<sftp commands>": 0 if they all succeed (sftp -b aborts on the first failure)
+sftp_batch() {
+  # shellcheck disable=SC2046
+  sftp -q -b - $(ssh_opts) "$REMOTE_USER@$REMOTE_HOST" <<<"$1" >/dev/null 2>&1
+}
+remote_repo_exists() { sftp_batch "ls $REMOTE_PATH/config"; }
+
+remote_instructions() {
+  cat <<EOF
+
+    One-time setup on len-linux. SSH in (ssh len-linux), then paste these one at a time:
+
+      sudo adduser --disabled-password --comment "restic backups from $(hostname)" $REMOTE_USER
+      sudo install -d -m 700 -o $REMOTE_USER -g $REMOTE_USER /home/$REMOTE_USER/.ssh
+      echo 'restrict,command="/usr/lib/openssh/sftp-server" $(cat "$SSH_KEY.pub")' | sudo tee /home/$REMOTE_USER/.ssh/authorized_keys
+      sudo chown $REMOTE_USER:$REMOTE_USER /home/$REMOTE_USER/.ssh/authorized_keys && sudo chmod 600 /home/$REMOTE_USER/.ssh/authorized_keys
+
+    (A '$REMOTE_USER' account with no password whose only possible login is this key, and
+    the key can only do SFTP: no shell, no commands, no forwarding.)
+    Then re-run:  sudo bash $(readlink -f "${BASH_SOURCE[0]}") install
+EOF
+}
+
+# Nightly: send new snapshots, apply the same retention; maintenance adds prune + verify.
+remote_copy() {  # $1 = 1 for maintenance
+  remote_repo_exists || { warn "no repository at $(remote_url) (or len-linux unreachable). Run install"; return 1; }
+  from_args
+  rrestic copy "${FROM[@]}" || return 1
+  rrestic forget "${KEEP[@]}" | tail -3 || return 1
+  if (( $1 )); then
+    rrestic prune | tail -3 || return 1
+    rrestic check --read-data-subset="$CHECK_SUBSET" || { warn "restic check on len-linux found problems"; return 1; }
+  fi
+}
+
 # ------------------------------------------------------------------ renderers
 render_excludes() {
   cat <<'EOF'
@@ -105,6 +169,8 @@ render_service() {
 [Unit]
 Description=restic whole-system backup to $REPO
 RequiresMountsFor=$DATA_MNT
+Wants=network-online.target
+After=network-online.target tailscaled.service
 
 [Service]
 Type=oneshot
@@ -234,6 +300,11 @@ render_restore_doc() {  # $1 = latest snapshot description
     pw_need="[ ] (no restic password: this repo was set up without one)"
     pw_note=""
   fi
+  local remote_row="" dd_history="(backup history starts over unless another copy exists elsewhere)"
+  if remote_enabled; then
+    remote_row=$'\n'"  Root NVMe AND data disk both dead               -> \"BOTH DISKS DEAD\" (end of this file)"
+    dd_history="(use the SAME restic password: history is safe on len-linux and copying resumes)"
+  fi
   cat <<EOF
 ==========================================================================
   $HOST DISASTER RECOVERY: READ THIS FIRST
@@ -259,8 +330,7 @@ WHICH SITUATION ARE YOU IN?
                                                      "ANOTHER COMPUTER" (below) to just read
   Only need some files back, not the whole system -> "GET INDIVIDUAL FILES BACK" (below)
   Data disk rejects the CORRECT passphrase        -> "DATA DISK WON'T UNLOCK" (below)
-  Only the data disk died, Linux is fine          -> last item of "IF SOMETHING GOES WRONG"
-
+  Only the data disk died, Linux is fine          -> last item of "IF SOMETHING GOES WRONG"${remote_row}
   Steps 1-9 rebuild the root disk EXACTLY as of the last snapshot, in about 1.5 hours.
   The data disk is only READ, never changed.
 
@@ -319,7 +389,7 @@ STEP 5  Restore everything (about 1 hour, progress is shown)
   # older backup instead? replace "latest" with an ID from "\$R snapshots"
 
 STEP 6  Recreate what the backup skips on purpose
-  mkdir -p /mnt/root/{proc,sys,dev,run,tmp,var/tmp,srv/data,mnt/backup}
+  mkdir -p /mnt/root/{proc,sys,dev,run,tmp,var/tmp,srv/data,scratch}
   chmod 1777 /mnt/root/tmp /mnt/root/var/tmp
   chattr +i /mnt/root/srv/data            # lock the empty mountpoint (restic can't restore this flag),
                                           # so nothing lands on the root disk if the data disk isn't mounted
@@ -365,7 +435,7 @@ IF SOMETHING GOES WRONG
   * Only the DATA disk died (Linux is fine): none of this applies. Put in the new
     disk and run:  sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh --format-new-disk
     then  sudo bash ~/code/useful-scripts/storage/system-backup.sh install
-    (backup history starts over unless another copy exists elsewhere)
+    ${dd_history}
 
 --------------------------------------------------------------------------
 READ THE DATA DISK ON ANOTHER COMPUTER  (motherboard/CPU died, TPM gone)
@@ -414,6 +484,51 @@ DATA DISK WON'T UNLOCK, even with the correct passphrase
   - It takes the passphrase that was current when the backup was made. If you
     changed the passphrase since, use the old one.
   - Afterwards, on $HOST, re-link the TPM: sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh
+EOF
+  if remote_enabled; then render_remote_doc "$r_flags"; fi
+}
+
+# Guide section for restoring from the second copy when the data disk is gone too.
+render_remote_doc() {  # $1 = restic flags (password mode)
+  cat <<EOF
+
+--------------------------------------------------------------------------
+BOTH DISKS DEAD: RESTORE FROM THE SECOND COPY ON LEN-LINUX
+  Every night the snapshots are also copied to len-linux (user $REMOTE_USER,
+  $REMOTE_PATH), encrypted with the same restic password. The restore kit was on
+  the dead data disk, but everything it held is inside the snapshots too.
+  You need, besides the usual list:
+  [ ] len-linux switched on and on the network
+  [ ] The SSH key file restic-$NAME (password manager, saved as a file).
+      Lost it? From any computer that can log in to len-linux, append a new
+      public key to /home/$REMOTE_USER/.ssh/authorized_keys with the same
+      restrict,command="/usr/lib/openssh/sftp-server" prefix as the existing line.
+  [ ] An internet connection for the live USB (to install restic)
+
+  1. Do STEP 1, connect to the network, then (in the root terminal):
+       add-apt-repository -y universe && apt update && apt install -y restic
+  2. Put the key in place. Download it in Firefox first, then:
+       install -D -m 600 /home/ubuntu/Downloads/restic-$NAME /root/.ssh/restic-key
+       printf 'Host len-linux\n  HostName $REMOTE_LAN_HINT\n  User $REMOTE_USER\n  IdentityFile /root/.ssh/restic-key\n  StrictHostKeyChecking accept-new\n' > /root/.ssh/config
+     ($REMOTE_LAN_HINT = len-linux on the home LAN when this was written; check the
+     router if it changed. len-linux somewhere else? Install Tailscale on the live USB
+     (curl -fsSL https://tailscale.com/install.sh | sh && tailscale up) and put
+     $REMOTE_HOST in the HostName instead.)
+  3. R="restic -r sftp:len-linux:$REMOTE_PATH $1"
+     \$R snapshots                         # should list the backups
+  4. Do STEP 3 (pick the target disk, set T=), then STEP 4 with the layout taken
+     from the snapshot instead of the kit:
+       \$R dump latest /var/backups/system-metadata/layout.sfdisk > /root/layout.sfdisk
+       sfdisk \$T < /root/layout.sfdisk
+     and the rest of STEP 4 as written (udevadm settle, ROOT=/ESP=, both mkfs).
+  5. STEPS 5-7 exactly as written, with this \$R. The restore runs over the network:
+     expect ~2 hours.
+  6. STEP 8, but skip "umount /mnt/data; cryptsetup close data" (no data disk).
+  7. After the first boot: new data disk ->
+       sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh --format-new-disk
+       sudo bash ~/code/useful-scripts/storage/system-backup.sh install
+     Use the SAME restic password. Nightly copies to len-linux carry on and its
+     history stays.
 EOF
 }
 
@@ -467,8 +582,17 @@ cmd_install() {
     else
       rm -f "$PASSFILE"
     fi
-    restic init >/dev/null
-    ok "repository initialized ($(mode_desc))"
+    if remote_enabled && [[ -s $SSH_KEY ]] && remote_repo_exists; then
+      # new data disk, len-linux copy survives: match its chunking so copies keep deduping
+      local rf=(--from-repo "$(remote_url)" -o sftp.args="$(ssh_opts)")
+      if [[ -s $PASSFILE ]]; then rf+=(--from-password-file "$PASSFILE"); else rf+=(--from-insecure-no-password); fi
+      restic init "${rf[@]}" --copy-chunker-params >/dev/null \
+        || die "couldn't open the len-linux copy with that password: use the same restic password"
+      ok "repository initialized ($(mode_desc)), chunking matched to the len-linux copy"
+    else
+      restic init >/dev/null
+      ok "repository initialized ($(mode_desc))"
+    fi
   fi
 
   step "Restore kit + guide"
@@ -491,7 +615,37 @@ cmd_install() {
   systemctl enable --now $UNIT.timer >/dev/null 2>&1
   ok "timer enabled, next run: $(systemctl show $UNIT.timer -p NextElapseUSecRealtime --value)"
 
+  local remote_ok=0
+  if remote_enabled; then
+    step "Second copy: $(remote_url)"
+    if [[ ! -s $SSH_KEY ]]; then
+      install -d -m 700 /root/.ssh
+      ssh-keygen -q -t ed25519 -N '' -C "root@$(hostname) restic copy" -f "$SSH_KEY"
+      ok "created SSH key $SSH_KEY"
+    else
+      ok "SSH key $SSH_KEY"
+    fi
+    if ! sftp_batch "pwd"; then
+      warn "can't log in to $REMOTE_USER@$REMOTE_HOST yet (normal the first time)"
+      remote_instructions
+    elif remote_repo_exists; then
+      rrestic cat config >/dev/null 2>&1 \
+        || die "$(remote_url) exists but your restic password doesn't open it"
+      ok "remote repository opens"; remote_ok=1
+    else
+      from_args
+      rrestic init "${FROM[@]}" --copy-chunker-params >/dev/null
+      ok "remote repository initialized (same password; chunking matches, so copies dedupe)"
+      remote_ok=1
+    fi
+  fi
+
   step "Done"
+  if remote_enabled; then
+    info "For a 'both disks died' restore, also save the PRIVATE key $SSH_KEY"
+    info "in your password manager:  sudo cat $SSH_KEY"
+    (( remote_ok )) && info "The first copy to len-linux runs with the next backup (~300 GB, ~1.5 h)."
+  fi
   if compgen -G "$STATE/last-success" >/dev/null; then
     info "Check it any time:  sudo system-backup status"
   else
@@ -537,7 +691,20 @@ cmd_run() {
 
   mkdir -p "$STATE"
   echo "$(date +%s) $(date -Is) snapshot=$snap rc=$rc" > "$STATE/last-success"
+
+  local remote_rc=0
+  if remote_enabled; then
+    step "Second copy -> $(remote_url)"
+    if remote_copy "$maint"; then
+      echo "$(date +%s) $(date -Is) snapshot=$snap" > "$STATE/remote-last-success"
+      ok "len-linux copy up to date"
+    else
+      remote_rc=1
+      warn "copy to len-linux FAILED. The local backup is fine; it retries next run"
+    fi
+  fi
   step "Done: snapshot $snap"
+  return $remote_rc
 }
 
 cmd_status() {
@@ -561,11 +728,32 @@ cmd_status() {
   need_mount
   restic snapshots --compact | tail -12
   info "repo size on disk: $(du -sh "$REPO" | cut -f1)"
+
+  if remote_enabled; then
+    step "Second copy on len-linux ($(remote_url))"
+    if [[ -f $STATE/remote-last-success ]]; then
+      local r_epoch r_age
+      read -r r_epoch _ < "$STATE/remote-last-success"
+      r_age=$(( ( $(date +%s) - r_epoch ) / 3600 ))
+      info "last copied: $(cut -d' ' -f2- "$STATE/remote-last-success")  (${r_age}h ago)"
+      (( r_age <= 36 )) || warn "older than 36h: is len-linux up? see  journalctl -u $UNIT"
+    else
+      warn "never copied yet"
+    fi
+    if remote_repo_exists; then
+      info "snapshots there: $(rrestic snapshots --json 2>/dev/null | grep -o '"short_id"' | wc -l)"
+    else
+      warn "can't reach the len-linux repository right now"
+    fi
+  fi
 }
 
-case ${1:-} in
-  install) cmd_install ;;
-  run)     shift; cmd_run "$@" ;;
-  status)  cmd_status ;;
-  *)       sed -n '2,8p' "$0"; exit 1 ;;
-esac
+# Sourceable for testing (functions only); runs a command when executed.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  case ${1:-} in
+    install) cmd_install ;;
+    run)     shift; cmd_run "$@" ;;
+    status)  cmd_status ;;
+    *)       sed -n '2,8p' "$0"; exit 1 ;;
+  esac
+fi

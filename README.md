@@ -326,6 +326,7 @@ Nightly [restic](https://restic.net) backup of the entire bigrig-linux root disk
 - **🔑 Your password, or none**: `install` asks for a restic password. Your own is saved root-only (`/root/.config/restic/bigrig-linux.pass`, 0600) so nightly runs are unattended. Press Enter for none (`--insecure-no-password`), and the LUKS data disk's encryption plus root-only 0700 permissions still protect the repo.
 - **🧰 Restore kit + doomsday guide**: `Backups/README-RESTORE.txt` is a step-by-step "root NVMe died" walkthrough, regenerated every run with this machine's disks (model/serial/role), IDs and copy-paste live-USB commands. `Backups/bigrig-linux-restore/` holds a restic binary, the partition layout and package lists, so it works without internet. Keep a copy of the guide off the disk too.
 - **⏰ Hands-off**: systemd timer at 04:45 (after the app DB dumps), catches up after downtime, lowest CPU priority. Keeps 7 daily / 4 weekly / 6 monthly / 1 yearly. Sundays add prune + `restic check --read-data-subset=5%`.
+- **🛰️ Second copy on len-linux**: after each run, `restic copy` sends the new snapshots to a second repo on len-linux (SFTP over Tailscale, same password and retention), so the backups survive the data disk, or all of bigrig, dying. Root uses a dedicated key that len-linux only allows for SFTP, as a passwordless `restic` account: no shell, no commands, no forwarding. A failed copy never blocks the local backup: the run exits 1 and `status` flags it. Set `REMOTE_HOST=` (empty) in the config block to turn it off.
 
 ### 🚀 Usage
 
@@ -343,6 +344,13 @@ sudo system-backup run --maintenance         # force prune + verify
 - `/usr/local/sbin/system-backup` (a copy of this script), `/etc/restic/bigrig-linux.excludes`
 - `/root/.config/restic/bigrig-linux.pass` (0600), only if you set a password
 - `/etc/systemd/system/system-backup.{service,timer}`
+- `/root/.ssh/restic-bigrig-linux` (SSH key for the len-linux copy) and `/root/.ssh/known_hosts.restic`
+
+#### Setting up the len-linux copy (one time)
+1. `sudo bash storage/system-backup.sh install` creates the key and prints four commands to paste on len-linux. They create the `restic` account and authorize the key for SFTP only.
+2. Run `install` again. It initializes the len-linux repo with the same chunking as the local one, so copies deduplicate.
+3. Run `sudo system-backup run` in tmux. The first copy is about 300 GB (about 1.5 h at ~57 MB/s over Tailscale); after that it's only each night's changes.
+4. Save the **private** key (`sudo cat /root/.ssh/restic-bigrig-linux`) in your password manager. A live USB needs it to restore from len-linux if both of bigrig's disks are gone.
 
 ### 🧯 Recovery Scenarios
 
@@ -354,7 +362,8 @@ The full copy-paste commands for every case are in `Backups/README-RESTORE.txt`.
 | Motherboard/CPU died, disks fine | Same steps on the new board; nothing is tied to the old one. To just read the data, plug the 8 TB disk into any Linux PC (section 8). After the first boot, enable fTPM and re-run `setup-data-drive.sh`. |
 | Only need some files back | `restic ls latest /path` to browse, then `restic restore latest --include /path --target /tmp/restored`. Works on a running bigrig or from a live USB. |
 | Data disk rejects the correct passphrase | Damaged LUKS header: restore it from the header backup (section 8). |
-| Only the data disk died | `setup-data-drive.sh --format-new-disk`, then `system-backup.sh install`. Backup history starts over. |
+| Only the data disk died | `setup-data-drive.sh --format-new-disk`, then `system-backup.sh install` with the **same** restic password. History is safe on len-linux, and the new local repo copies len-linux's chunking. |
+| Root NVMe **and** data disk dead | Guide section "BOTH DISKS DEAD": live USB → `apt install restic` → the SSH key from your password manager → restore over the network from len-linux. The disk layout comes out of the snapshot (`restic dump latest /var/backups/system-metadata/layout.sfdisk`). |
 
 Quick check that a backup can be read back (about 2 minutes):
 
