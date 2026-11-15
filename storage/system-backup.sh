@@ -606,7 +606,9 @@ cmd_install() {
 
   step "Config + scheduled job"
   if render_excludes | write_file "$EXCLUDES"; then ok "excludes written"; else ok "excludes unchanged"; fi
-  if cmp -s "$(readlink -f "$0")" "$INSTALLED" 2>/dev/null; then ok "$INSTALLED up to date"
+  if [[ $(readlink -f "$0") == "$(readlink -f "$INSTALLED")" ]]; then
+    ok "running $INSTALLED itself (to update it, run install from the repo copy of this script)"
+  elif cmp -s "$(readlink -f "$0")" "$INSTALLED" 2>/dev/null; then ok "$INSTALLED up to date"
   else install -m 755 "$(readlink -f "$0")" "$INSTALLED"; ok "installed $INSTALLED"; fi
   local changed=0
   render_service | write_file /etc/systemd/system/$UNIT.service && changed=1
@@ -644,7 +646,7 @@ cmd_install() {
   if remote_enabled; then
     info "For a 'both disks died' restore, also save the PRIVATE key $SSH_KEY"
     info "in your password manager:  sudo cat $SSH_KEY"
-    (( remote_ok )) && info "The first copy to len-linux runs with the next backup (~300 GB, ~1.5 h)."
+    (( remote_ok )) && [[ ! -f $STATE/remote-last-success ]] && info "The first copy to len-linux runs with the next backup (~300 GB, ~1.5 h)."
   fi
   if compgen -G "$STATE/last-success" >/dev/null; then
     info "Check it any time:  sudo system-backup status"
