@@ -13,7 +13,7 @@ A collection of high-performance utility scripts for system maintenance, backup 
 - [install-claude-statusline.sh (Claude Code Status Line)](#6-install-claude-statuslinesh---claude-code-status-line)
 - [recreate-mac-shell.sh (Mac zsh Prompt Setup)](#7-recreate-mac-shellsh---mac-zsh-prompt-setup)
 - [storage/setup-data-drive.sh (Encrypted Archive HDD Setup)](#8-storagesetup-data-drivesh---encrypted-archive-hdd-setup)
-- [storage/system-backup.sh (Whole-System restic Backup)](#9-storagesystem-backupsh---whole-system-restic-backup)
+- [storage/system-backup.sh (Whole-System restic Backup)](#9-storagesystem-backupsh---whole-system-restic-backup), incl. smallrig and `setup-backup-disk.sh`
 - [Getting Started](#getting-started)
 
 ---
@@ -319,7 +319,7 @@ sudo cryptsetup luksHeaderRestore /dev/sdX1 --header-backup-file luks-header-<se
 
 ## 🗄️ 9. `storage/system-backup.sh` - Whole-System restic Backup
 
-Nightly [restic](https://restic.net) backup of the entire bigrig-linux root disk to the encrypted data disk (`/srv/data/Backups/bigrig-linux`). Each run also writes an offline **restore kit**, so a wiped machine can go from an Ubuntu live USB back to its exact state in about an hour.
+Nightly [restic](https://restic.net) backup of the entire bigrig-linux root disk to the encrypted data disk (`/srv/data/Backups/bigrig-linux`). The same script also runs on smallrig-linux with its own profile (see "smallrig-linux" below). Each run also writes an offline **restore kit**, so a wiped machine can go from an Ubuntu live USB back to its exact state in about an hour.
 
 ### ✨ Key Features
 - **💯 Whole system**: `/` + `/boot/efi` on one filesystem: `/etc`, `/home` (including `~/.ssh`), Docker images and volumes, Ollama models, `/opt`. Skips swap, tmp, apt debs, Docker build cache, and `~/.cache` (except `huggingface`).
@@ -375,6 +375,27 @@ sudo rm -rf /tmp/drill
 
 > [!NOTE]
 > From the Mac, `bigrig-linux/` and `bigrig-linux-restore/` show a red "no entry" badge. That's intended: they're root-only (0700), so nothing on the Mac can change or delete the backups. The restore runs as root, from a live USB or on bigrig itself.
+
+### 🖥️ smallrig-linux
+
+The script picks a profile by hostname (config block at the top). smallrig's differs from bigrig's in three ways:
+
+| | bigrig-linux | smallrig-linux |
+|---|---|---|
+| Local disk | 8 TB IronWolf, LUKS + TPM, Samba share (`setup-data-drive.sh`) | 500 GB laptop HDD, plain ext4, label `backup` (`setup-backup-disk.sh`) |
+| Repo | `/srv/data/Backups/bigrig-linux`, restic password | `/srv/backup/smallrig-linux`, **no password** (no encryption anywhere) |
+| Second copy | len-linux (`restic` account) | none: local disk only |
+
+`storage/setup-backup-disk.sh` prepares smallrig's disk the same way `setup-data-drive.sh` does bigrig's, minus encryption and sharing: GPT + ext4 `-m 0`, fstab by UUID with `nofail`, `chattr +i` on the empty mountpoint, 30-minute spin-down, smartd (hourly, `-n standby`, short test Sundays, long test monthly) and a SMART baseline. It's idempotent: re-running it only fixes drift.
+
+```bash
+sudo bash storage/setup-backup-disk.sh --format-new-disk  # first time / replacement disk (asks for the serial)
+sudo bash storage/setup-backup-disk.sh                    # re-apply config, never formats
+sudo bash storage/setup-backup-disk.sh --status           # mount, health, sleep (won't wake the disk)
+sudo bash storage/system-backup.sh install                # then the backup, exactly as on bigrig
+```
+
+Recovery works like bigrig's rows above, minus the len-linux row: if smallrig's root NVMe and backup disk both die, there is no other copy. smallrig's guide is `/srv/backup/README-RESTORE.txt`, and it covers the unencrypted disk (no passphrase or LUKS steps).
 
 ---
 

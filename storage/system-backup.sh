@@ -1,64 +1,83 @@
 #!/usr/bin/env bash
-# system-backup.sh — nightly restic backup of the whole bigrig-linux system to the
-# encrypted data disk, plus an offline "restore kit" for bare-metal recovery.
+# system-backup.sh — nightly restic backup of the whole system to a local disk, a second
+# copy on len-linux, plus an offline "restore kit" for bare-metal recovery.
+# One script for several machines: the config section has a profile per hostname
+# (bigrig-linux: LUKS data disk, password, 2nd copy on len-linux; smallrig-linux: plain
+# backup disk, no password, local only).
 #
 #   sudo bash system-backup.sh install   # set up repo, excludes, timer (idempotent)
 #   sudo system-backup run               # back up now (the timer runs this nightly)
 #   sudo system-backup run --maintenance # ...and also prune + verify (auto on Sundays)
 #   sudo system-backup status            # snapshots, last success, next run
 #
-# What it does
-#   Repo      /srv/data/Backups/bigrig-linux (root-only 0700) on the LUKS-encrypted data
-#             disk. `install` asks for a restic password: type your own (saved root-only
-#             in /root/.config/restic/ so nightly runs are unattended; keep it in your
-#             password manager too) or press Enter for none (--insecure-no-password,
-#             restic >= 0.17; the disk encryption still protects it). Copying the repo to
-#             unencrypted media? `restic copy` it into a password-protected repo instead.
-#   Scope     / and /boot/efi, --one-file-system (skips /srv/data, /scratch, /proc...).
-#             Includes /etc, /home (with ~/.ssh), /var/lib/docker (images + volumes),
-#             Ollama models, /opt. Excludes swap, tmp, apt debs, docker build cache,
-#             ~/.cache except huggingface, Trash. Deliberately NOT --exclude-caches: uv
-#             tags every .venv with CACHEDIR.TAG, so it would skip ~25 GB of venvs
-#             (sglang, manim, app backends) that are slow to rebuild.
+# What it does  (<host> = bigrig-linux or smallrig-linux)
+#   Repo      bigrig: /srv/data/Backups/<host> on the LUKS-encrypted data disk.
+#             smallrig: /srv/backup/<host> on a plain ext4 backup disk (setup-backup-disk.sh).
+#             Root-only 0700 either way. `install` asks for a restic password: type your
+#             own (saved root-only in /root/.config/restic/ so nightly runs are unattended;
+#             keep it in your password manager too) or press Enter for none
+#             (--insecure-no-password, restic >= 0.17). bigrig uses a password; smallrig
+#             has none on purpose (no encryption anywhere on that box).
+#   Scope     / and /boot/efi, --one-file-system (skips the backup/data disk, /scratch,
+#             /proc...). Includes /etc, /home (with ~/.ssh), /var/lib/docker (images +
+#             volumes), Ollama models, /opt. Excludes swap, tmp, apt debs, docker build
+#             cache, ~/.cache except huggingface, Trash. Deliberately NOT --exclude-caches:
+#             uv tags every .venv with CACHEDIR.TAG, so it would skip GBs of venvs that
+#             are slow to rebuild.
 #   Metadata  Before each run: partition layout (sfdisk), filesystem UUIDs, EFI boot
 #             entries, package lists, docker images -> /var/backups/system-metadata
 #             (so it's inside every snapshot) and the restore kit.
-#   Kit       /srv/data/Backups/bigrig-linux-restore: restic binary + this script +
-#             metadata. Guide: /srv/data/Backups/README-RESTORE.txt (copy in the kit as
-#             RESTORE.txt), a step-by-step "root NVMe died" walkthrough with this
-#             machine's disks, IDs and commands, regenerated on every run.
+#   Kit       <backup dir>/<host>-restore: restic binary + this script + metadata.
+#             Guide: <backup dir>/README-RESTORE.txt (copy in the kit as RESTORE.txt), a
+#             step-by-step "root NVMe died" walkthrough with this machine's disks, IDs
+#             and commands, regenerated on every run.
 #   Schedule  04:45 nightly (after the T3 03:30 / numz 04:15 DB dumps), catches up after
-#             downtime. Lowest CPU priority. Keep 7 daily / 4 weekly / 6 monthly / 1 yearly.
+#             downtime.
+#             Lowest CPU priority. Keep 7 daily / 4 weekly / 6 monthly / 1 yearly.
 #             Sundays: prune + `restic check --read-data-subset=5%`.
-#   2nd copy  After each run, `restic copy` sends the new snapshots to a second repo on
+#   2nd copy  (bigrig only; smallrig has REMOTE_HOST empty)
+#             After each run, `restic copy` sends the new snapshots to a second repo on
 #             len-linux over SFTP (Tailscale), same password + retention, so the backups
-#             survive the data disk (or this whole box) dying. Root uses a dedicated key
-#             (/root/.ssh/restic-bigrig-linux) that len-linux only allows for SFTP, as a
+#             survive the local disk (or this whole box) dying. Root uses a dedicated key
+#             (/root/.ssh/restic-<host>) that len-linux only allows for SFTP, as a
 #             dedicated `restic` user. `install` prints the one-time len-linux commands.
 #             A failed copy never blocks the local backup; the run exits 1 and `status`
-#             flags it. Set REMOTE_HOST= (empty) to turn the second copy off.
+#             flags it. An empty REMOTE_HOST in the profile turns the second copy off.
 set -euo pipefail
 
 # ------------------------------------------------------------------ config
-NAME=bigrig-linux
-DATA_MNT=/srv/data
-REPO=$DATA_MNT/Backups/$NAME
-KIT=$DATA_MNT/Backups/$NAME-restore
+NAME=${SYSTEM_BACKUP_HOST:-$(hostname)}     # (override only to test another profile)
+case $NAME in
+  bigrig-linux)    # 8TB IronWolf: LUKS + TPM, Samba share "data", set up by setup-data-drive.sh
+    DATA_MNT=/srv/data;   BACKUP_DIR=$DATA_MNT/Backups; DATA_LUKS=1; DATA_SHARE=data
+    DATA_WORD="data disk"; DATA_DESC="8TB data disk"; DISK_SCRIPT=setup-data-drive.sh
+    SKIP_MOUNTS=(srv/data scratch)   # mountpoints restic skips (--one-file-system)
+    SCHEDULE='*-*-* 04:45:00'
+    REMOTE_HOST=len-linux.encke-chicken.ts.net; REMOTE_USER=restic ;;
+  smallrig-linux)  # 500GB laptop HDD: plain ext4, only holds this repo, set up by setup-backup-disk.sh
+    DATA_MNT=/srv/backup; BACKUP_DIR=$DATA_MNT;         DATA_LUKS=0; DATA_SHARE=
+    DATA_WORD="backup disk"; DATA_DESC="500GB backup disk"; DISK_SCRIPT=setup-backup-disk.sh
+    SKIP_MOUNTS=(srv/backup)
+    SCHEDULE='*-*-* 04:45:00'
+    REMOTE_HOST=; REMOTE_USER= ;;    # local copy only, no second copy on len-linux
+  *) echo "system-backup: no profile for host '$NAME' (add one to the config section)" >&2; exit 1 ;;
+esac
+REPO=$BACKUP_DIR/$NAME
+KIT=$BACKUP_DIR/$NAME-restore
+GUIDE=$BACKUP_DIR/README-RESTORE.txt
 PASSFILE=/root/.config/restic/$NAME.pass   # present = password mode, absent = no password
 EXCLUDES=/etc/restic/$NAME.excludes
 META=/var/backups/system-metadata
 STATE=/var/lib/system-backup
 INSTALLED=/usr/local/sbin/system-backup
 UNIT=system-backup
-SCHEDULE='*-*-* 04:45:00'
 KEEP=(--keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 1)
 CHECK_SUBSET=5%
 BACKUP_PATHS=(/ /boot/efi)
-# Second copy (empty REMOTE_HOST = off). Tailscale name, so it works wherever len-linux lives.
-REMOTE_HOST=len-linux.encke-chicken.ts.net
+# Second copy: REMOTE_HOST/REMOTE_USER come from the profile (empty REMOTE_HOST = off).
+# Tailscale name, so it works wherever len-linux lives.
 REMOTE_LAN_HINT=192.168.1.31                 # len-linux on the home LAN (for a live-USB restore)
-REMOTE_USER=restic
-REMOTE_PATH=/home/restic/$NAME
+REMOTE_PATH=/home/$REMOTE_USER/$NAME
 SSH_KEY=/root/.ssh/restic-$NAME
 SSH_KNOWN=/root/.ssh/known_hosts.restic
 
@@ -93,7 +112,7 @@ write_file() {
 }
 
 need_root()  { [[ $EUID -eq 0 ]] || die "run with sudo"; }
-need_mount() { mountpoint -q "$DATA_MNT" || die "$DATA_MNT is not mounted (data disk locked or missing?)"; }
+need_mount() { mountpoint -q "$DATA_MNT" || die "$DATA_MNT is not mounted ($DATA_WORD missing or locked?)"; }
 repo_ready() { [[ -f $REPO/config ]]; }
 
 # ------------------------------------------------------------------ second copy (len-linux)
@@ -300,50 +319,139 @@ render_restore_doc() {  # $1 = latest snapshot description
     pw_need="[ ] (no restic password: this repo was set up without one)"
     pw_note=""
   fi
+  local pw_same="use the SAME restic password"
+  [[ -s $PASSFILE ]] || pw_same="press Enter for no password again"
+  local rel=${BACKUP_DIR#"$DATA_MNT"}          # backup folder relative to the disk: /Backups or ""
+  local mnt_list chattr_line sit_dd
+  mnt_list=$(IFS=,; echo "proc,sys,dev,run,tmp,var/tmp,${SKIP_MOUNTS[*]}")
   local remote_row="" dd_history="(backup history starts over unless another copy exists elsewhere)"
   if remote_enabled; then
-    remote_row=$'\n'"  Root NVMe AND data disk both dead               -> \"BOTH DISKS DEAD\" (end of this file)"
-    dd_history="(use the SAME restic password: history is safe on len-linux and copying resumes)"
+    remote_row=$'\n'$(printf '  %-48s%s' "Root NVMe AND $DATA_WORD both dead" '-> "BOTH DISKS DEAD" (end of this file)')
+    dd_history="($pw_same: history is safe on len-linux and copying resumes)"
   fi
+
+  # --- the parts that differ between an encrypted+shared data disk and a plain backup disk
+  local keep_copy folder_line mac_badge="" sit_luks="" need_luks="" need_hdr="" step2 step8_umount step9_mount other_pc unlock_doc=""
+  if (( DATA_LUKS )); then
+    local share_note=""
+    [[ -n $DATA_SHARE ]] && share_note=" It's on the \"$DATA_SHARE\" share as ${rel#/}/README-RESTORE.txt."
+    keep_copy="KEEP A COPY OFF THIS DISK (Mac, phone, printout): you can only read this one after
+step 2, unlocking the data disk.$share_note
+Re-copy it after big changes (new disks, new passphrase)."
+    sit_luks=$'\n'"  Data disk rejects the CORRECT passphrase        -> \"DATA DISK WON'T UNLOCK\" (below)"
+    need_luks=$'\n'"  [ ] The DATA-DISK passphrase (password manager)"
+    need_hdr=$'\n'"  [ ] Only if the data disk won't unlock: luks-header-$DATA_DISK_SERIAL.img (password manager)"
+    step2="STEP 2  Unlock the data disk, READ-ONLY so the backups can't be damaged
+  lsblk -o NAME,SIZE,MODEL,SERIAL,FSTYPE
+    -> find $DATA_DISK_MODEL (serial $DATA_DISK_SERIAL); its partition says crypto_LUKS
+  cryptsetup open /dev/sdX1 data          # <- that partition, e.g. sda1; asks the passphrase
+  mkdir -p /mnt/data && mount -o ro /dev/mapper/data /mnt/data"
+    step8_umount="umount /mnt/data; cryptsetup close data"
+    step9_mount="  - $DATA_MNT should mount by itself. If it doesn't (new motherboard/TPM, BIOS reset):
+      sudo bash ~/code/useful-scripts/storage/$DISK_SCRIPT
+    (asks the data-disk passphrase once and re-links it to the TPM). It stops if it
+    finds no TPM: on a new board, turn on the firmware TPM (AMD fTPM) in the BIOS first.
+    Linux boots fine without $DATA_MNT meanwhile (the disk is marked \"nofail\")."
+    other_pc="READ THE DATA DISK ON ANOTHER COMPUTER  (motherboard/CPU died, TPM gone)
+  The TPM only saves typing the passphrase at boot. The passphrase alone opens
+  the disk on any Linux machine.
+  - Connect the ${DATA_DESC%% *} disk ($DATA_DISK_MODEL, serial $DATA_DISK_SERIAL) to any PC:
+    a spare SATA port, or a USB-to-SATA adapter/dock.
+  - Boot the Ubuntu USB stick there (or use any Linux machine), open a terminal:
+      sudo -i
+  - Do STEP 2. Videos, backups and this kit are now under /mnt/data, read-only.
+    (As root, the root-only folders the Mac can't open are readable.)
+  - Rebuilding on a new motherboard or PC: STEPS 1-9 work as written; nothing in the
+    backup is tied to the old board. Mind the TPM note in step 9."
+    unlock_doc="
+
+DATA DISK WON'T UNLOCK, even with the correct passphrase
+  Rule out typos first: the live USB uses a US keyboard layout, so type the
+  passphrase into a text editor to see what comes out.
+  Why it can happen: the disk is encrypted with a random MASTER KEY. The LUKS
+  header (first 16 MB of the partition) stores that key, locked by your passphrase.
+  If the header is damaged (bad sectors, formatting the wrong disk, a stray dd or
+  Windows \"Initialize disk\"), the passphrase has nothing left to unlock, even
+  though all the data is still there. The header backup fixes it:
+  - The file: luks-header-$DATA_DISK_SERIAL.img, in your password manager (the original
+    is in /root on the old root disk). Get it onto the live session (download it
+    in Firefox, or copy from a USB stick), then cd to it: cd /home/ubuntu/Downloads
+  - Check:  cryptsetup luksDump /dev/sdX1     # errors / \"not a valid LUKS device\" = damaged
+  - Test with the backup WITHOUT writing anything to the disk:
+      cryptsetup open --readonly --header luks-header-$DATA_DISK_SERIAL.img /dev/sdX1 data
+      mkdir -p /mnt/data && mount -o ro /dev/mapper/data /mnt/data && ls /mnt/data
+  - Data visible? Make the fix permanent (writes ONLY the header):
+      umount /mnt/data; cryptsetup close data
+      cryptsetup luksHeaderRestore /dev/sdX1 --header-backup-file luks-header-$DATA_DISK_SERIAL.img
+    then carry on with STEP 2 as normal.
+  - It takes the passphrase that was current when the backup was made. If you
+    changed the passphrase since, use the old one.
+  - Afterwards, on $HOST, re-link the TPM: sudo bash ~/code/useful-scripts/storage/$DISK_SCRIPT"
+  else
+    keep_copy="KEEP A COPY OFF THIS DISK (Mac, phone, printout): if this machine won't boot you
+can only read this one from a live USB (step 2). It's at $GUIDE.
+Re-copy it after big changes (new disks)."
+    step2="STEP 2  Mount the backup disk READ-ONLY so the backups can't be damaged
+  lsblk -o NAME,SIZE,MODEL,SERIAL,FSTYPE,LABEL
+    -> find $DATA_DISK_MODEL (serial $DATA_DISK_SERIAL); its partition is ext4, label \"backup\"
+  mkdir -p /mnt/data && mount -o ro /dev/sdX1 /mnt/data   # <- that partition, e.g. sda1"
+    step8_umount="umount /mnt/data"
+    step9_mount="  - $DATA_MNT should mount by itself. If it doesn't:
+      sudo bash ~/code/useful-scripts/storage/$DISK_SCRIPT
+    Linux boots fine without $DATA_MNT meanwhile (the disk is marked \"nofail\")."
+    other_pc="READ THE BACKUP DISK ON ANOTHER COMPUTER  (motherboard/CPU died)
+  The backup disk is not encrypted: any Linux machine can read it.
+  - Connect the disk ($DATA_DISK_MODEL, serial $DATA_DISK_SERIAL) to any PC:
+    a spare SATA port, or a USB-to-SATA adapter/dock.
+  - Boot the Ubuntu USB stick there (or use any Linux machine), open a terminal:
+      sudo -i
+  - Do STEP 2. The backups and this kit are now under /mnt/data, read-only.
+  - Rebuilding on a new motherboard or PC: STEPS 1-9 work as written; nothing in the
+    backup is tied to the old board."
+  fi
+  if [[ -n $rel ]]; then folder_line="WHAT IS IN THIS FOLDER  (${rel#/}/ on the $DATA_DESC)"
+  else folder_line="WHAT IS ON THE $(tr '[:lower:]' '[:upper:]' <<<"$DATA_WORD")  (the $DATA_DESC, mounted at $DATA_MNT)"; fi
+  if [[ -n $DATA_SHARE ]]; then
+    mac_badge=$'\n'"  From the Mac the two folders show a red \"no entry\" badge: intended. They're
+  root-only, so nothing on the Mac (a mistake, ransomware) can change or delete them."
+  fi
+  chattr_line=$(printf '  %-40s%s\n%42s%s' "chattr +i /mnt/root$DATA_MNT" \
+    "# lock the empty mountpoint (restic can't restore this flag)," "" \
+    "# so nothing lands on the root disk if the $DATA_WORD isn't mounted")
+  sit_dd=$(printf '  %-48s%s' "Only the $DATA_WORD died, Linux is fine" '-> last item of "IF SOMETHING GOES WRONG"')
+
   cat <<EOF
 ==========================================================================
   $HOST DISASTER RECOVERY: READ THIS FIRST
 ==========================================================================
 Regenerated automatically on every backup. Do not edit (it gets replaced).
-KEEP A COPY OFF THIS DISK (Mac, phone, printout): you can only read this one after
-step 2, unlocking the data disk. It's on the "data" share as Backups/README-RESTORE.txt.
-Re-copy it after big changes (new disks, new passphrase).
+$keep_copy
 Last refreshed: $(date '+%F %R %Z')      Latest snapshot: $1
 
-WHAT IS IN THIS FOLDER  (Backups/ on the 8TB data disk)
+$folder_line
   $HOST/            restic repository: nightly snapshots of the WHOLE root disk
                          (Ubuntu, /etc, /home, Docker images+volumes, Ollama models)
   $HOST-restore/    restore kit: restic program, disk layout, package lists,
                          the backup script, and a copy of this guide (RESTORE.txt)
-  README-RESTORE.txt     this file
-  From the Mac the two folders show a red "no entry" badge: intended. They're
-  root-only, so nothing on the Mac (a mistake, ransomware) can change or delete them.
+  README-RESTORE.txt     this file${mac_badge}
 
 WHICH SITUATION ARE YOU IN?
   Root NVMe died, got wiped, or Linux won't boot  -> WHAT YOU NEED, then STEPS 1-9
   Motherboard/CPU died, disks are fine            -> STEPS 1-9 on the new board, or
                                                      "ANOTHER COMPUTER" (below) to just read
-  Only need some files back, not the whole system -> "GET INDIVIDUAL FILES BACK" (below)
-  Data disk rejects the CORRECT passphrase        -> "DATA DISK WON'T UNLOCK" (below)
-  Only the data disk died, Linux is fine          -> last item of "IF SOMETHING GOES WRONG"${remote_row}
+  Only need some files back, not the whole system -> "GET INDIVIDUAL FILES BACK" (below)${sit_luks}
+$sit_dd${remote_row}
   Steps 1-9 rebuild the root disk EXACTLY as of the last snapshot, in about 1.5 hours.
-  The data disk is only READ, never changed.
+  The $DATA_WORD is only READ, never changed.
 
 WHAT YOU NEED
   [ ] A replacement NVMe: any brand/model/size above ~$(( ROOT_USED_GB + 100 )) GB (root had ~$ROOT_USED_GB GB
         in use at last backup). Old disk was ~$(( ROOT_DISK_BYTES / 1000000000 )) GB; that size or bigger is ideal.
   [ ] A USB stick (8 GB+), written on any computer:
         Ubuntu Desktop 26.04 from https://ubuntu.com/download/desktop
-        written with balenaEtcher (Mac/Windows) or Rufus (Windows)
-  [ ] The DATA-DISK passphrase (password manager)
+        written with balenaEtcher (Mac/Windows) or Rufus (Windows)${need_luks}
   $pw_need
-  [ ] ~1.5 hours, a keyboard and a monitor on this machine
-  [ ] Only if the data disk won't unlock: luks-header-$DATA_DISK_SERIAL.img (password manager)
+  [ ] ~1.5 hours, a keyboard and a monitor on this machine${need_hdr}
 
 DISKS IN THIS MACHINE AT LAST BACKUP: identify disks by MODEL + SERIAL, names can change
 $(cat "$META/disks.txt")
@@ -359,13 +467,9 @@ STEP 1  Boot the USB stick
   - Choose "Try Ubuntu" (NOT "Install"). Open a terminal (Ctrl+Alt+T), then:
       sudo -i
 
-STEP 2  Unlock the data disk, READ-ONLY so the backups can't be damaged
-  lsblk -o NAME,SIZE,MODEL,SERIAL,FSTYPE
-    -> find $DATA_DISK_MODEL (serial $DATA_DISK_SERIAL); its partition says crypto_LUKS
-  cryptsetup open /dev/sdX1 data          # <- that partition, e.g. sda1; asks the passphrase
-  mkdir -p /mnt/data && mount -o ro /dev/mapper/data /mnt/data
-  KIT=/mnt/data/Backups/$HOST-restore
-  export RESTIC_REPOSITORY=/mnt/data/Backups/$HOST
+$step2
+  KIT=/mnt/data$rel/$HOST-restore
+  export RESTIC_REPOSITORY=/mnt/data$rel/$HOST
   R="\$KIT/restic $r_flags"
   \$R snapshots                            # list of backups, newest at the bottom${pw_note:+
 $pw_note}
@@ -389,10 +493,9 @@ STEP 5  Restore everything (about 1 hour, progress is shown)
   # older backup instead? replace "latest" with an ID from "\$R snapshots"
 
 STEP 6  Recreate what the backup skips on purpose
-  mkdir -p /mnt/root/{proc,sys,dev,run,tmp,var/tmp,srv/data,scratch}
+  mkdir -p /mnt/root/{$mnt_list}
   chmod 1777 /mnt/root/tmp /mnt/root/var/tmp
-  chattr +i /mnt/root/srv/data            # lock the empty mountpoint (restic can't restore this flag),
-                                          # so nothing lands on the root disk if the data disk isn't mounted
+$chattr_line
   fallocate -l $SWAP_BYTES /mnt/root/swap.img && chmod 600 /mnt/root/swap.img && mkswap /mnt/root/swap.img
 
 STEP 7  Make it bootable
@@ -403,17 +506,13 @@ STEP 7  Make it bootable
   # (The kernel/initramfs come back from the backup unchanged, so no rebuild is needed.)
 
 STEP 8  Reboot
-  umount -R /mnt/root; umount /mnt/data; cryptsetup close data
+  umount -R /mnt/root; $step8_umount
   reboot                                  # pull out the USB stick
   Doesn't boot? Tap F8 and pick "ubuntu" on the new disk.
 
 STEP 9  After the first boot
   - Log in normally. Docker apps (T3, numz) start by themselves; check:  docker ps
-  - /srv/data should mount by itself. If it doesn't (new motherboard/TPM, BIOS reset):
-      sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh
-    (asks the data-disk passphrase once and re-links it to the TPM). It stops if it
-    finds no TPM: on a new board, turn on the firmware TPM (AMD fTPM) in the BIOS first.
-    Linux boots fine without /srv/data meanwhile (the disk is marked "nofail").
+$step9_mount
   - Turn backups back on:  sudo bash ~/code/useful-scripts/storage/system-backup.sh install
   - Anything broken?       systemctl --failed
 
@@ -432,71 +531,44 @@ IF SOMETHING GOES WRONG
         chroot /mnt/root update-grub
   * Stuck at a "grub>" prompt or no boot entry: boot the USB again, redo steps 2, 5
     (mount commands only), and 7.
-  * Only the DATA disk died (Linux is fine): none of this applies. Put in the new
-    disk and run:  sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh --format-new-disk
+  * Only the $(tr '[:lower:]' '[:upper:]' <<<"${DATA_WORD% disk}") disk died (Linux is fine): none of this applies. Put in the new
+    disk and run:  sudo bash ~/code/useful-scripts/storage/$DISK_SCRIPT --format-new-disk
     then  sudo bash ~/code/useful-scripts/storage/system-backup.sh install
     ${dd_history}
 
 --------------------------------------------------------------------------
-READ THE DATA DISK ON ANOTHER COMPUTER  (motherboard/CPU died, TPM gone)
-  The TPM only saves typing the passphrase at boot. The passphrase alone opens
-  the disk on any Linux machine.
-  - Connect the 8TB disk ($DATA_DISK_MODEL, serial $DATA_DISK_SERIAL) to any PC:
-    a spare SATA port, or a USB-to-SATA adapter/dock.
-  - Boot the Ubuntu USB stick there (or use any Linux machine), open a terminal:
-      sudo -i
-  - Do STEP 2. Videos, backups and this kit are now under /mnt/data, read-only.
-    (As root, the root-only folders the Mac can't open are readable.)
-  - Rebuilding on a new motherboard or PC: STEPS 1-9 work as written; nothing in the
-    backup is tied to the old board. Mind the TPM note in step 9.
+$other_pc
 
 GET INDIVIDUAL FILES BACK  (no full restore)
   From a live USB / another computer, do STEP 2 first. On a working $HOST, instead:
       sudo -i
-      R="restic -r /srv/data/Backups/$HOST $r_flags"
+      R="restic -r $REPO $r_flags"
   Then:
       \$R snapshots                                    # pick "latest" or an older ID
       \$R ls latest /home/shsin/code                   # browse what's in a snapshot
       \$R restore latest --include /home/shsin/code --target /tmp/restored
   Files land under /tmp/restored/home/shsin/code, owned like the originals.
   Copy what you need back, then:  rm -rf /tmp/restored
-  (On a live USB, /tmp is RAM: for more than a few GB, --target a mounted disk.)
-
-DATA DISK WON'T UNLOCK, even with the correct passphrase
-  Rule out typos first: the live USB uses a US keyboard layout, so type the
-  passphrase into a text editor to see what comes out.
-  Why it can happen: the disk is encrypted with a random MASTER KEY. The LUKS
-  header (first 16 MB of the partition) stores that key, locked by your passphrase.
-  If the header is damaged (bad sectors, formatting the wrong disk, a stray dd or
-  Windows "Initialize disk"), the passphrase has nothing left to unlock, even
-  though all the data is still there. The header backup fixes it:
-  - The file: luks-header-$DATA_DISK_SERIAL.img, in your password manager (the original
-    is in /root on the old root disk). Get it onto the live session (download it
-    in Firefox, or copy from a USB stick), then cd to it: cd /home/ubuntu/Downloads
-  - Check:  cryptsetup luksDump /dev/sdX1     # errors / "not a valid LUKS device" = damaged
-  - Test with the backup WITHOUT writing anything to the disk:
-      cryptsetup open --readonly --header luks-header-$DATA_DISK_SERIAL.img /dev/sdX1 data
-      mkdir -p /mnt/data && mount -o ro /dev/mapper/data /mnt/data && ls /mnt/data
-  - Data visible? Make the fix permanent (writes ONLY the header):
-      umount /mnt/data; cryptsetup close data
-      cryptsetup luksHeaderRestore /dev/sdX1 --header-backup-file luks-header-$DATA_DISK_SERIAL.img
-    then carry on with STEP 2 as normal.
-  - It takes the passphrase that was current when the backup was made. If you
-    changed the passphrase since, use the old one.
-  - Afterwards, on $HOST, re-link the TPM: sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh
+  (On a live USB, /tmp is RAM: for more than a few GB, --target a mounted disk.)${unlock_doc}
 EOF
   if remote_enabled; then render_remote_doc "$r_flags"; fi
 }
 
-# Guide section for restoring from the second copy when the data disk is gone too.
+# Guide section for restoring from the second copy when the local backup disk is gone too.
 render_remote_doc() {  # $1 = restic flags (password mode)
+  local pw_how="encrypted with the same restic password" pw_again="Use the SAME restic password"
+  if [[ ! -s $PASSFILE ]]; then
+    pw_how="with no password, like the local one"; pw_again="Press Enter for no password again"
+  fi
+  local skip_umount="umount /mnt/data; cryptsetup close data"
+  (( DATA_LUKS )) || skip_umount="umount /mnt/data"
   cat <<EOF
 
 --------------------------------------------------------------------------
 BOTH DISKS DEAD: RESTORE FROM THE SECOND COPY ON LEN-LINUX
   Every night the snapshots are also copied to len-linux (user $REMOTE_USER,
-  $REMOTE_PATH), encrypted with the same restic password. The restore kit was on
-  the dead data disk, but everything it held is inside the snapshots too.
+  $REMOTE_PATH), $pw_how. The restore kit was on
+  the dead $DATA_WORD, but everything it held is inside the snapshots too.
   You need, besides the usual list:
   [ ] len-linux switched on and on the network
   [ ] The SSH key file restic-$NAME (password manager, saved as a file).
@@ -523,11 +595,11 @@ BOTH DISKS DEAD: RESTORE FROM THE SECOND COPY ON LEN-LINUX
      and the rest of STEP 4 as written (udevadm settle, ROOT=/ESP=, both mkfs).
   5. STEPS 5-7 exactly as written, with this \$R. The restore runs over the network:
      expect ~2 hours.
-  6. STEP 8, but skip "umount /mnt/data; cryptsetup close data" (no data disk).
-  7. After the first boot: new data disk ->
-       sudo bash ~/code/useful-scripts/storage/setup-data-drive.sh --format-new-disk
+  6. STEP 8, but skip "$skip_umount" (no $DATA_WORD).
+  7. After the first boot: new $DATA_WORD ->
+       sudo bash ~/code/useful-scripts/storage/$DISK_SCRIPT --format-new-disk
        sudo bash ~/code/useful-scripts/storage/system-backup.sh install
-     Use the SAME restic password. Nightly copies to len-linux carry on and its
+     $pw_again. Nightly copies to len-linux carry on and its
      history stays.
 EOF
 }
@@ -539,7 +611,7 @@ write_kit() {  # $1 = latest snapshot description
   install -m 755 "$(readlink -f "$0")" "$KIT/system-backup.sh"
   rm -rf "$KIT/metadata"; cp -a "$META" "$KIT/metadata"
   render_restore_doc "${1:-none yet}" > "$KIT/RESTORE.txt"
-  install -m 644 "$KIT/RESTORE.txt" "$DATA_MNT/Backups/README-RESTORE.txt"
+  install -m 644 "$KIT/RESTORE.txt" "$GUIDE"
 }
 
 # ------------------------------------------------------------------ commands
@@ -573,7 +645,8 @@ cmd_install() {
   else
     info "Choose a restic password. It's saved root-only in $PASSFILE so nightly runs"
     info "work unattended (keep a copy in your password manager). Or press Enter for no"
-    info "password: the repo is still protected by the data-disk encryption."
+    if (( DATA_LUKS )); then info "password: the repo is still protected by the data-disk encryption."
+    else info "password (no encryption: whoever has the disk or len-linux access can read it)."; fi
     read -rsp "    Password: " pw; echo
     if [[ -n $pw ]]; then
       read -rsp "    Again:    " pw2; echo
@@ -602,7 +675,7 @@ cmd_install() {
   else
     write_kit "none yet (run: sudo system-backup run)"
   fi
-  ok "$DATA_MNT/Backups/README-RESTORE.txt written"
+  ok "$GUIDE written"
 
   step "Config + scheduled job"
   if render_excludes | write_file "$EXCLUDES"; then ok "excludes written"; else ok "excludes unchanged"; fi
@@ -646,12 +719,12 @@ cmd_install() {
   if remote_enabled; then
     info "For a 'both disks died' restore, also save the PRIVATE key $SSH_KEY"
     info "in your password manager:  sudo cat $SSH_KEY"
-    (( remote_ok )) && [[ ! -f $STATE/remote-last-success ]] && info "The first copy to len-linux runs with the next backup (~300 GB, ~1.5 h)."
+    (( remote_ok )) && [[ ! -f $STATE/remote-last-success ]] && info "The first copy to len-linux runs with the next backup (~$(du -sh "$REPO" | cut -f1) to send, ~57 MB/s)."
   fi
   if compgen -G "$STATE/last-success" >/dev/null; then
     info "Check it any time:  sudo system-backup status"
   else
-    info "Run the first backup now (~420 GB, about an hour; use tmux):  sudo system-backup run"
+    info "Run the first backup now (~$(( $(df -B1 --output=used / | tail -1) / 1000000000 )) GB to read; use tmux):  sudo system-backup run"
   fi
 }
 
@@ -689,7 +762,7 @@ cmd_run() {
 
   step "Restore kit + guide"
   write_kit "$snap ($(date '+%F %R'))"
-  ok "$KIT and $DATA_MNT/Backups/README-RESTORE.txt refreshed"
+  ok "$KIT and $GUIDE refreshed"
 
   mkdir -p "$STATE"
   echo "$(date +%s) $(date -Is) snapshot=$snap rc=$rc" > "$STATE/last-success"
@@ -726,7 +799,7 @@ cmd_status() {
   step "Scheduled job"
   info "timer: $(systemctl is-active $UNIT.timer)   next: $(systemctl show $UNIT.timer -p NextElapseUSecRealtime --value)"
   info "last job result: $(systemctl show $UNIT.service -p Result --value)"
-  step "Snapshots (reads the data disk)"
+  step "Snapshots (reads the $DATA_WORD)"
   need_mount
   restic snapshots --compact | tail -12
   info "repo size on disk: $(du -sh "$REPO" | cut -f1)"
@@ -756,6 +829,6 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     install) cmd_install ;;
     run)     shift; cmd_run "$@" ;;
     status)  cmd_status ;;
-    *)       sed -n '2,8p' "$0"; exit 1 ;;
+    *)       sed -n '2,10p' "$0"; exit 1 ;;
   esac
 fi
