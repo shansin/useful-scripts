@@ -153,9 +153,10 @@ format_disk() {
   read -rp "    This ERASES everything on $dev ($(lsblk -dno MODEL "$dev" | xargs)). Type its serial ($serial) to continue: " ans
   [[ -n $serial && $ans == "$serial" ]] || die "serial didn't match, nothing changed"
 
-  # remember old filesystem UUIDs so their fstab lines get replaced
+  # remember old filesystem UUIDs so their fstab lines get replaced (appended, so a
+  # re-run after a failed format still knows the UUIDs from before the wipe)
   mapfile -t olds < <(lsblk -nro UUID "$dev" | grep . || true)
-  printf '%s\n' "${olds[@]}" > "/run/setup-backup-disk.old-uuids"
+  (( ${#olds[@]} )) && printf '%s\n' "${olds[@]}" >> "/run/setup-backup-disk.old-uuids"
   for p in $(lsblk -nro MOUNTPOINTS "$dev" | grep . || true); do
     umount "$p" && info "unmounted $p"
   done
@@ -163,7 +164,7 @@ format_disk() {
 
   for p in "$DISK"-part*; do [[ -e $p ]] && wipefs -a "$p" >/dev/null; done
   wipefs -a "$DISK" >/dev/null
-  printf 'label: gpt\n,,L,name=%s\n' "$PART_NAME" | sfdisk -q "$DISK"
+  printf 'label: gpt\ntype=L, name=%s\n' "$PART_NAME" | sfdisk -q "$DISK"
   udevadm settle
   for _ in {1..20}; do [[ -e $PART ]] && break; sleep 0.5; done
   [[ -e $PART ]] || die "$PART didn't appear"
@@ -187,7 +188,7 @@ apply() {
   [[ -e $DISK ]] || die "$DISK not found (set DISK=/dev/disk/by-id/... for a replacement disk)"
   serial=$(lsblk -dno SERIAL "$(readlink -f "$DISK")" | xargs)
   (( format )) && format_disk
-  [[ -f /run/setup-backup-disk.old-uuids ]] && mapfile -t olds < /run/setup-backup-disk.old-uuids
+  [[ -f /run/setup-backup-disk.old-uuids ]] && mapfile -t olds < <(sort -u /run/setup-backup-disk.old-uuids)
 
   step "Filesystem"
   [[ -e $PART ]] || die "$PART not found. If this is a NEW disk, re-run with --format-new-disk"
